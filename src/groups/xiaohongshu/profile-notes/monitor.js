@@ -11,6 +11,12 @@ import {
   renderTaskDetailModal,
   tagTaskDataRow
 } from "../../../shared/task-detail.js";
+import {
+  DEFAULT_TASK_CONCURRENCY,
+  MAX_TASK_CONCURRENCY,
+  normalizeTaskConcurrency,
+  runConcurrentTasks
+} from "../../../shared/concurrent-task-pool.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileV1";
 const MAX_RECORDS_PER_STATUS = 200;
@@ -21,6 +27,7 @@ const DEFAULT_OPTIONS = Object.freeze({
   limit: 20,
   intervalMinMs: 100,
   intervalMaxMs: 6000,
+  concurrency: DEFAULT_TASK_CONCURRENCY,
   polling: false,
   pollingMinutes: 10
 });
@@ -214,6 +221,7 @@ function saveState(state) {
       profileUrls: uniqueUrls(state.profileUrls),
       config: {
         limit: state.limit,
+        concurrency: normalizeTaskConcurrency(state.concurrency),
         ...normalizeProfileIntervalRange(state),
         polling: Boolean(state.polling),
         pollingMinutes: asInteger(state.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440)
@@ -258,9 +266,10 @@ function renderRunOptions(state) {
     <section class="xhs-options-card">
       <button class="xhs-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
         <span aria-hidden="true">⌄</span>
-        <span class="xhs-options-title"><strong>运行选项</strong><small>结果数量、随机执行间隔与循环监控</small></span>
+        <span class="xhs-options-title"><strong>运行选项</strong><small>结果数量、并发任务、随机执行间隔与循环监控</small></span>
         <span class="xhs-option-summary">
           <span><small>每个主页笔记数</small><strong>${state.limit}</strong></span>
+          <span><small>并发任务</small><strong>${state.concurrency}</strong></span>
           <span><small>执行间隔</small><strong>${intervalSummary(state)}</strong></span>
           <span><small>循环监控</small><strong>${state.polling ? `${state.pollingMinutes} 分钟` : "关闭"}</strong></span>
         </span>
@@ -268,12 +277,17 @@ function renderRunOptions(state) {
       </button>
       ${state.optionsOpen ? `
         <div class="xhs-options-body">
-          <p class="xhs-options-note">没有页面筛选条件。运行只采集主页笔记卡片；笔记不足设定数量时，以实际数量为准。</p>
+          <p class="xhs-options-note">没有页面筛选条件。每个主页链接都是独立任务，并发任务使用独立后台标签页；笔记不足设定数量时，以实际数量为准。</p>
           <div class="xhs-options-grid">
             <label class="xhs-control">
               <span>每个主页笔记数</span>
               <input type="number" min="1" max="100" value="${state.limit}" data-field="limit" ${disabled}>
               <small>默认 20 条；采集顺序与博主主页笔记列表保持一致。</small>
+            </label>
+            <label class="xhs-control">
+              <span>并发任务数</span>
+              <input type="number" min="1" max="${MAX_TASK_CONCURRENCY}" value="${state.concurrency}" data-field="concurrency" ${disabled}>
+              <small>同时采集 ${state.concurrency} 个主页；设为 1 时按顺序执行，最多 ${MAX_TASK_CONCURRENCY} 个。</small>
             </label>
             <label class="xhs-control">
               <span>博主主页执行间隔</span>
@@ -415,7 +429,7 @@ function renderTaskDetails(state) {
 }
 
 function renderRunButton(state, className = "") {
-  if (state.running) return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止"}</button>`;
+  if (state.running) return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`;
   return `<button class="xhs-primary-button ${className}" type="button" data-action="run">运行</button>`;
 }
 
@@ -488,6 +502,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     guideOpen: false,
     taskDetailRecordId: "",
     limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100),
+    concurrency: normalizeTaskConcurrency(savedConfig.concurrency),
     intervalMinMs: savedInterval.intervalMinMs,
     intervalMaxMs: savedInterval.intervalMaxMs,
     polling: Boolean(savedConfig.polling),
@@ -549,7 +564,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
   const startRun = async () => {
     if (state.running) return;
     if (!isExtensionRuntime()) {
-      state.notice = { tone: "error", text: "博主主页采集只能在已加载扩展的 Chrome 侧边栏中运行。" };
+      state.notice = { tone: "error", text: "博主主页采集只能在已加载扩展的 Chrome 控制台中运行。" };
       render();
       return;
     }
@@ -567,7 +582,11 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     }
 
     state.profileUrls = profileUrls;
-    const control = { runId: `XHP-${String(Date.now()).slice(-8)}`, tabId: null, stopRequested: false, activeRecord: null };
+    const control = {
+      runId: `XHP-${String(Date.now()).slice(-8)}`,
+      stopRequested: false,
+      activeCaptureRunIds: new Set()
+    };
     activeRun = control;
     activeProfileRun = control;
     state.running = true;
@@ -583,53 +602,55 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
         const round = completedRounds + 1;
         let roundFailed = 0;
         let roundAdded = 0;
-        for (let index = 0; index < profileUrls.length; index += 1) {
-          if (control.stopRequested) break;
-          const profileUrl = profileUrls[index];
-          const profileRecord = createRecord(control, profileUrl, round, index);
-          control.activeRecord = profileRecord;
-          state.notice = { tone: "info", text: `第 ${round} 轮，正在采集 ${index + 1}/${profileUrls.length} 个博主主页…` };
-          saveState(state);
-          render();
-          try {
-            const response = await sendMessage({
-              type: MESSAGE_CAPTURE_XIAOHONGSHU_PROFILE,
-              options: { runId: control.runId, tabId: control.tabId, profileUrl, limit: state.limit }
-            });
-            if (control.stopRequested) {
-              finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "stopped");
-              break;
+        await runConcurrentTasks(profileUrls, {
+          concurrency: state.concurrency,
+          shouldStop: () => control.stopRequested,
+          worker: async (profileUrl, index) => {
+            if (index >= state.concurrency) {
+              await waitForProfileInterval(state, control, {
+                onWait: (intervalMs) => {
+                  state.notice = { tone: "info", text: `正在准备后续主页，随机等待 ${intervalMs} ms（范围 ${intervalSummary(state)}）…` };
+                  saveState(state);
+                  render();
+                }
+              });
             }
-            if (!response?.ok) throw new Error(response?.error || "小红书博主采集失败");
-            control.tabId = Number.isInteger(response.tabId) ? response.tabId : control.tabId;
-            const added = mergeDataRows(state, response.data, { runId: control.runId, recordId: profileRecord.record.id });
-            roundAdded += added;
-            addedTotal += added;
-            finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "success", response.data?.notes?.length || 0);
-          } catch (error) {
-            if (control.stopRequested) finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "stopped");
-            else {
-              const errorText = error.message || String(error);
-              roundFailed += 1;
-              finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "error", 0, errorText);
-              state.notice = { tone: "error", text: `博主主页采集失败：${errorText}` };
-            }
-          } finally {
-            control.activeRecord = null;
+            if (control.stopRequested) return;
+            const profileRecord = createRecord(control, profileUrl, round, index);
+            const captureRunId = profileRecord.record.id;
+            control.activeCaptureRunIds.add(captureRunId);
+            state.notice = { tone: "info", text: `第 ${round} 轮，正在并发采集 ${control.activeCaptureRunIds.size}/${state.concurrency} 个博主主页…` };
             saveState(state);
             render();
-          }
-          if (control.stopRequested) break;
-          if (index < profileUrls.length - 1) {
-            await waitForProfileInterval(state, control, {
-              onWait: (intervalMs) => {
-                state.notice = { tone: "info", text: `当前主页已完成，本次随机等待 ${intervalMs} ms（范围 ${intervalSummary(state)}），再采集下一个主页…` };
-                saveState(state);
-                render();
+            try {
+              const response = await sendMessage({
+                type: MESSAGE_CAPTURE_XIAOHONGSHU_PROFILE,
+                options: { runId: captureRunId, tabId: null, isolated: true, profileUrl, limit: state.limit }
+              });
+              if (control.stopRequested) {
+                finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "stopped");
+                return;
               }
-            });
+              if (!response?.ok) throw new Error(response?.error || "小红书博主采集失败");
+              const added = mergeDataRows(state, response.data, { runId: control.runId, recordId: profileRecord.record.id });
+              roundAdded += added;
+              addedTotal += added;
+              finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "success", response.data?.notes?.length || 0);
+            } catch (error) {
+              if (control.stopRequested) finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "stopped");
+              else {
+                const errorText = error.message || String(error);
+                roundFailed += 1;
+                finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "error", 0, errorText);
+                state.notice = { tone: "error", text: `博主主页采集失败：${errorText}` };
+              }
+            } finally {
+              control.activeCaptureRunIds.delete(captureRunId);
+              saveState(state);
+              render();
+            }
           }
-        }
+        });
         if (control.stopRequested) break;
         completedRounds = round;
         if (!state.polling) {
@@ -650,7 +671,6 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       }
     } catch (error) {
       const errorText = error.message || String(error);
-      if (control.activeRecord) finishRecord(control.activeRecord.record.id, control.activeRecord.startedAtMs, control.stopRequested ? "stopped" : "error", 0, control.stopRequested ? "" : errorText);
       state.notice = control.stopRequested ? { tone: "warning", text: `任务已停止，停止前新增 ${addedTotal} 条数据。` } : { tone: "error", text: errorText };
       state.tab = "records";
     } finally {
@@ -669,9 +689,11 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     if (!state.running || !control || control.stopRequested) return;
     control.stopRequested = true;
     state.stopping = true;
-    state.notice = { tone: "warning", text: "正在停止任务并释放小红书页面连接…" };
+    state.notice = { tone: "warning", text: "正在停止全部并发任务并释放小红书页面连接…" };
     render();
-    await sendMessage({ type: MESSAGE_STOP_XIAOHONGSHU_PROFILE, options: { runId: control.runId } });
+    await Promise.all([...control.activeCaptureRunIds].map((runId) => (
+      sendMessage({ type: MESSAGE_STOP_XIAOHONGSHU_PROFILE, options: { runId } }).catch(() => null)
+    )));
   };
 
   const handleLiveRunFinished = async () => {
@@ -725,6 +747,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       case "reset":
         state.profileUrls = [...DEFAULT_PROFILE_URLS];
         state.limit = DEFAULT_OPTIONS.limit;
+        state.concurrency = DEFAULT_OPTIONS.concurrency;
         state.intervalMinMs = DEFAULT_OPTIONS.intervalMinMs;
         state.intervalMaxMs = DEFAULT_OPTIONS.intervalMaxMs;
         state.polling = DEFAULT_OPTIONS.polling;
@@ -743,6 +766,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     if (event.target.matches("[data-batch-input]")) state.batchDraft = event.target.value;
     const field = event.target.dataset.field;
     if (field === "limit") state.limit = asInteger(event.target.value, state.limit, 1, 100);
+    if (field === "concurrency") state.concurrency = normalizeTaskConcurrency(event.target.value, state.concurrency);
     if (field === "intervalMinMs") state.intervalMinMs = asInteger(event.target.value, state.intervalMinMs, 100, 6000);
     if (field === "intervalMaxMs") state.intervalMaxMs = asInteger(event.target.value, state.intervalMaxMs, 100, 6000);
     if (field === "pollingMinutes") state.pollingMinutes = asInteger(event.target.value, state.pollingMinutes, 1, 1440);
@@ -753,7 +777,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     const field = event.target.dataset.field;
     if (field === "intervalMinMs" || field === "intervalMaxMs") Object.assign(state, normalizeProfileIntervalRange(state));
     if (field === "polling") state.polling = event.target.checked;
-    if (["limit", "intervalMinMs", "intervalMaxMs", "polling", "pollingMinutes"].includes(field)) { saveState(state); render(); }
+    if (["limit", "concurrency", "intervalMinMs", "intervalMaxMs", "polling", "pollingMinutes"].includes(field)) { saveState(state); render(); }
   };
   const handleKeydown = (event) => {
     if (event.key !== "Escape") return;

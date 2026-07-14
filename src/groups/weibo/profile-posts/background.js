@@ -20,6 +20,11 @@ function callChrome(callbackApi) {
   });
 }
 
+async function closePluginCreatedTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
+}
+
 function isWeiboProfileUrl(value) {
   try {
     const url = new URL(value);
@@ -27,12 +32,15 @@ function isWeiboProfileUrl(value) {
   } catch { return false; }
 }
 
-async function getWeiboTab(preferredTabId = null) {
+async function getWeiboTab(preferredTabId = null, isolated = false) {
   if (Number.isInteger(preferredTabId)) {
     try {
       const tab = await callChrome((done) => chrome.tabs.get(preferredTabId, done));
       if (tab?.url && /(^https:\/\/)([^/]+\.)?weibo\.com\//i.test(tab.url)) return tab;
     } catch { /* The previous task tab was closed. */ }
+  }
+  if (isolated) {
+    return callChrome((done) => chrome.tabs.create({ url: WEIBO_HOME_URL, active: false }, done));
   }
   const tabs = await callChrome((done) => chrome.tabs.query({ url: WEIBO_URL_PATTERNS }, done));
   const existing = [...tabs].sort((first, second) => {
@@ -136,13 +144,18 @@ export async function captureWeiboProfilePosts(options) {
   const runId = String(options.runId || "").trim();
   if (!isWeiboProfileUrl(profileUrl)) throw new Error("博主主页链接必须是 https://weibo.com/u/数字ID 格式。");
   if (!runId) throw new Error("缺少运行任务编号。");
-  const tab = await getWeiboTab(Number(options.tabId));
+  const parsedTabId = Number(options.tabId);
+  const hasRequestedTab = Number.isInteger(parsedTabId) && parsedTabId > 0;
+  const requestedTabId = hasRequestedTab ? parsedTabId : null;
+  const ownsTargetTab = Boolean(options.isolated) && !hasRequestedTab;
+  const tab = await getWeiboTab(requestedTabId, Boolean(options.isolated));
   if (!Number.isInteger(tab?.id)) throw new Error("无法找到用于微博博文采集的标签页。");
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
   let attached = false;
+  let completed = false;
   try {
-    await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
+    if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
     await attachDebugger(tab.id);
     attached = true;
     await sendCommand(tab.id, "Runtime.enable");
@@ -150,10 +163,13 @@ export async function captureWeiboProfilePosts(options) {
     throwIfStopped(session);
     await sendCommand(tab.id, "Page.navigate", { url: profileUrl });
     await waitForWeiboProfile(tab.id, session);
-    return { ok: true, tabId: tab.id, data: await collectPosts(tab.id, options.limit, session) };
+    const data = await collectPosts(tab.id, options.limit, session);
+    completed = true;
+    return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
     if (attached) await detachDebugger(tab.id).catch(() => {});
+    if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
 

@@ -22,6 +22,22 @@ const manifest = readJson(manifestPath);
 if (manifest.manifest_version !== 3) {
   throw new Error("manifest.json 必须使用 Manifest V3。 ");
 }
+if (manifest.permissions?.includes("sidePanel") || manifest.side_panel) {
+  throw new Error("控制台已改为完整标签页，manifest.json 不应再声明 Side Panel。 ");
+}
+if (!manifest.permissions?.includes("tabs")) {
+  throw new Error("唯一控制台标签页需要 tabs 权限。 ");
+}
+const serviceWorkerSource = readFileSync(join(root, "src/background/service-worker.js"), "utf8");
+if (
+  !serviceWorkerSource.includes('const DASHBOARD_PATH = "sidepanel.html";')
+  || !serviceWorkerSource.includes("chrome.action.onClicked.addListener")
+  || !serviceWorkerSource.includes("chrome.tabs.query({}, done)")
+  || !serviceWorkerSource.includes("chrome.windows.update(existing.windowId, { focused: true }, done)")
+  || !serviceWorkerSource.includes("dashboardOpenPromise")
+) {
+  throw new Error("扩展图标没有配置为定位唯一的完整控制台标签页。 ");
+}
 
 const config = readJson(configPath);
 if (!Array.isArray(config.groups) || config.groups.length === 0) {
@@ -152,6 +168,13 @@ const xiaohongshuBackgroundSource = readFileSync(join(
 ), "utf8");
 if (!/waitForFilteredSearchResults/.test(xiaohongshuBackgroundSource) || /await sleep\(900\);/.test(xiaohongshuBackgroundSource)) {
   throw new Error("小红书筛选后缺少结果稳定等待，或仍在使用固定 900 ms 等待。");
+}
+if (
+  !xiaohongshuBackgroundSource.includes('const autoClosed = opened && login.state === "logged_in";')
+  || !xiaohongshuBackgroundSource.includes("if (autoClosed) await closePluginCreatedTab(tab.id);")
+  || !xiaohongshuBackgroundSource.includes("const hasRequestedTab = Number.isInteger(parsedTabId) && parsedTabId > 0;")
+) {
+  throw new Error("小红书登录检测或独立采集页的自动关闭策略未正确处理空 tabId。 ");
 }
 const xiaohongshuPageExtractSource = readFileSync(join(
   root,
@@ -305,6 +328,122 @@ if (
   || taskDetailMarkup.includes("采集数据")
 ) {
   throw new Error("任务明细没有正确显示单个关键词任务或仍包含已移除区块。");
+}
+
+const taskPool = await import(pathToFileURL(join(root, "src/shared/concurrent-task-pool.js")).href);
+if (
+  taskPool.normalizeTaskConcurrency() !== 1
+  || taskPool.normalizeTaskConcurrency(0) !== 1
+  || taskPool.normalizeTaskConcurrency(99) !== 3
+) {
+  throw new Error("任务并发数没有限制在 1–3 的安全范围内。");
+}
+const unifiedFeatureStyles = readFileSync(join(root, "src/groups/xiaohongshu/keyword-search/styles.css"), "utf8");
+if (
+  !unifiedFeatureStyles.includes("--xhs-blue: #2f73e8;")
+  || !unifiedFeatureStyles.includes("--xhs-blue-dark: #1f5ec7;")
+  || !unifiedFeatureStyles.includes("--xhs-blue-soft: #edf4ff;")
+  || !/\.xhs-stop-button\s*\{\s*border:\s*1px solid #d85050;\s*background:\s*#d85050;/s.test(unifiedFeatureStyles)
+) {
+  throw new Error("功能运行按钮的蓝色待运行、红色停止状态没有统一。" );
+}
+let activeTaskCount = 0;
+let maxActiveTaskCount = 0;
+const completedConcurrentTasks = [];
+await taskPool.runConcurrentTasks(["a", "b", "c", "d"], {
+  concurrency: 2,
+  worker: async (item) => {
+    activeTaskCount += 1;
+    maxActiveTaskCount = Math.max(maxActiveTaskCount, activeTaskCount);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    completedConcurrentTasks.push(item);
+    activeTaskCount -= 1;
+  }
+});
+if (maxActiveTaskCount !== 2 || completedConcurrentTasks.length !== 4) {
+  throw new Error("任务并发池没有按设定并发数完成全部独立任务。");
+}
+const concurrentMonitorFiles = [
+  ["src/groups/google/google-news/monitor.js", /getOrCreateGoogleTab\(null, true\)/],
+  ["src/groups/xiaohongshu/keyword-search/monitor.js", /isolated:\s*true/],
+  ["src/groups/xiaohongshu/profile-notes/monitor.js", /isolated:\s*true/],
+  ["src/groups/xiaohongshu/profile-info/monitor.js", /isolated:\s*true/],
+  ["src/groups/weibo/profile-monitor.js", /isolated:\s*true/]
+];
+for (const [relativePath, isolatedTabMarker] of concurrentMonitorFiles) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  if (!/runConcurrentTasks/.test(source) || !isolatedTabMarker.test(source)) {
+    throw new Error(`${relativePath} 没有接入独立标签页的并发任务流程。`);
+  }
+}
+
+const isolatedTargetPageFiles = [
+  "src/groups/google/google-news/monitor.js",
+  "src/groups/xiaohongshu/keyword-search/background.js",
+  "src/groups/xiaohongshu/profile-notes/background.js",
+  "src/groups/xiaohongshu/profile-info/background.js",
+  "src/groups/weibo/profile-posts/background.js",
+  "src/groups/weibo/profile-info/background.js",
+  "src/groups/weibo/post-detail/background.js",
+  "src/groups/douyin/capture.js"
+];
+for (const relativePath of isolatedTargetPageFiles) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  if (!/isolated/.test(source) || !/active:\s*false/.test(source)) {
+    throw new Error(`${relativePath} 没有为采集任务保留独立且不抢焦点的目标标签页。`);
+  }
+}
+
+const targetTabCleanupFiles = [
+  "src/groups/xiaohongshu/keyword-search/background.js",
+  "src/groups/xiaohongshu/profile-notes/background.js",
+  "src/groups/xiaohongshu/profile-info/background.js",
+  "src/groups/weibo/profile-posts/background.js",
+  "src/groups/weibo/profile-info/background.js",
+  "src/groups/weibo/post-detail/background.js",
+  "src/groups/douyin/capture.js"
+];
+for (const relativePath of targetTabCleanupFiles) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  if (
+    !source.includes("closePluginCreatedTab")
+    || !source.includes("completed || session.stopped")
+    || !source.includes("Boolean(options.isolated) && !hasRequestedTab")
+  ) {
+    throw new Error(`${relativePath} 没有按成功/停止关闭、异常保留的采集标签页清理策略运行。`);
+  }
+}
+const googleMonitorCleanupSource = readFileSync(join(root, "src/groups/google/google-news/monitor.js"), "utf8");
+if (
+  !googleMonitorCleanupSource.includes("ownedTargetTabIds")
+  || !googleMonitorCleanupSource.includes("closePluginCreatedGoogleTab")
+) {
+  throw new Error("Google 新闻监控没有清理其创建的采集标签页。 ");
+}
+
+const persistentFeatureRuns = [
+  [
+    "src/groups/google/google-news/monitor.js",
+    "activeGoogleNewsRun",
+    "GOOGLE_NEWS_RUN_FINISHED_EVENT"
+  ],
+  [
+    "src/groups/xiaohongshu/keyword-search/monitor.js",
+    "activeXiaohongshuKeywordRun",
+    "XIAOHONGSHU_KEYWORD_RUN_FINISHED_EVENT"
+  ]
+];
+for (const [relativePath, activeRunName, finishedEventName] of persistentFeatureRuns) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  const cleanupStart = source.lastIndexOf("return () => {");
+  const cleanupSource = cleanupStart >= 0 ? source.slice(cleanupStart) : "";
+  if (
+    !source.includes(`let ${activeRunName} = null;`)
+    || !source.includes(finishedEventName)
+    || /stopRequested\s*=\s*true|MESSAGE_STOP_/.test(cleanupSource)
+  ) {
+    throw new Error(`${relativePath} 在切换功能页面时仍可能终止后台任务。`);
+  }
 }
 
 console.log(`验证通过：${config.groups.length} 个分组，${featureKeys.size} 个功能，${javascriptFiles.length} 个 JavaScript 文件。`);

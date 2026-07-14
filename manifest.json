@@ -6,7 +6,6 @@
   "permissions": [
     "activeTab",
     "debugger",
-    "sidePanel",
     "storage",
     "tabs"
   ],
@@ -23,9 +22,6 @@
   "background": {
     "service_worker": "src/background/service-worker.js",
     "type": "module"
-  },
-  "side_panel": {
-    "default_path": "sidepanel.html"
   },
   "action": {
     "default_title": "打开 BrowserCoreClaw"

@@ -14,6 +14,11 @@ function callChrome(callbackApi) {
   }));
 }
 
+async function closePluginCreatedTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
+}
+
 export function isDouyinProfileUrl(value) {
   try {
     const url = new URL(value);
@@ -31,12 +36,15 @@ export function isDouyinPostUrl(value) {
   } catch { return false; }
 }
 
-async function getDouyinTab(preferredTabId = null) {
+async function getDouyinTab(preferredTabId = null, isolated = false) {
   if (Number.isInteger(preferredTabId)) {
     try {
       const tab = await callChrome((done) => chrome.tabs.get(preferredTabId, done));
       if (tab?.url && /(^https:\/\/)([^/]+\.)?douyin\.com\//i.test(tab.url)) return tab;
     } catch { /* The former task tab might have been closed. */ }
+  }
+  if (isolated) {
+    return callChrome((done) => chrome.tabs.create({ url: DOUYIN_HOME_URL, active: false }, done));
   }
   // 任务首次运行时使用独立标签页，避免占用用户正在浏览、且可能被其它
   // 采集工具调试的抖音页面。后续同一任务会通过 tabId 复用该页面。
@@ -157,13 +165,18 @@ export async function captureDouyin(operation, options) {
     ? "抖音作品链接必须是 https://www.douyin.com/video/数字ID 或 v.douyin.com 短链格式。"
     : "抖音博主主页链接必须是 https://www.douyin.com/user/用户ID 格式。");
   if (!runId) throw new Error("缺少运行任务编号。");
-  const tab = await getDouyinTab(Number(options.tabId));
+  const parsedTabId = Number(options.tabId);
+  const hasRequestedTab = Number.isInteger(parsedTabId) && parsedTabId > 0;
+  const requestedTabId = hasRequestedTab ? parsedTabId : null;
+  const ownsTargetTab = Boolean(options.isolated) && !hasRequestedTab;
+  const tab = await getDouyinTab(requestedTabId, Boolean(options.isolated));
   if (!Number.isInteger(tab?.id)) throw new Error("无法找到用于抖音采集的标签页。");
   const session = { runId, operation, tabId: tab.id, stopped: false, reconnects: 0 };
   activeCaptures.set(`${operation}:${runId}`, session);
   let attached = false;
+  let completed = false;
   try {
-    await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
+    if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
     await attachDebugger(tab.id); attached = true;
     await sendCommand(tab.id, "Runtime.enable");
     await sendCommand(tab.id, "Page.enable");
@@ -176,10 +189,12 @@ export async function captureDouyin(operation, options) {
       : await pageCommand(tab.id, operation === "profile-info" ? "extract-profile" : "extract-detail");
     const validData = operation === "profile-posts" ? Array.isArray(data?.posts) : operation === "profile-info" ? Boolean(data?.profile?.profileId || data?.profile?.nickname) : Boolean(data?.detail?.videoId || data?.detail?.text);
     if (!validData) throw new Error(`未读取到抖音${operation === "profile-info" ? "博主资料" : operation === "profile-posts" ? "作品" : "作品详情"}，请确认链接可公开访问。`);
+    completed = true;
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(`${operation}:${runId}`) === session) activeCaptures.delete(`${operation}:${runId}`);
     if (attached) await detachDebugger(tab.id).catch(() => {});
+    if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
 

@@ -24,6 +24,11 @@ function callChrome(callbackApi) {
   });
 }
 
+async function closePluginCreatedTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
+}
+
 async function findOrOpenXiaohongshuTab() {
   const tabs = await callChrome((done) => chrome.tabs.query({ url: XIAOHONGSHU_URL_PATTERNS }, done));
   const tab = [...tabs].sort((first, second) => {
@@ -34,7 +39,7 @@ async function findOrOpenXiaohongshuTab() {
   return callChrome((done) => chrome.tabs.create({ url: XIAOHONGSHU_HOME_URL, active: true }, done));
 }
 
-async function getXiaohongshuTab(preferredTabId = null) {
+async function getXiaohongshuTab(preferredTabId = null, isolated = false) {
   if (Number.isInteger(preferredTabId)) {
     try {
       const preferredTab = await callChrome((done) => chrome.tabs.get(preferredTabId, done));
@@ -44,6 +49,9 @@ async function getXiaohongshuTab(preferredTabId = null) {
     } catch {
       // The previous tab may have been closed while a multi-profile task was running.
     }
+  }
+  if (isolated) {
+    return callChrome((done) => chrome.tabs.create({ url: XIAOHONGSHU_HOME_URL, active: false }, done));
   }
   return findOrOpenXiaohongshuTab();
 }
@@ -177,15 +185,20 @@ export async function captureXiaohongshuProfile(options) {
   }
   if (!runId) throw new Error("缺少运行任务编号。");
 
-  const tab = await getXiaohongshuTab(Number(options.tabId));
+  const parsedTabId = Number(options.tabId);
+  const hasRequestedTab = Number.isInteger(parsedTabId) && parsedTabId > 0;
+  const requestedTabId = hasRequestedTab ? parsedTabId : null;
+  const ownsTargetTab = Boolean(options.isolated) && !hasRequestedTab;
+  const tab = await getXiaohongshuTab(requestedTabId, Boolean(options.isolated));
   if (!Number.isInteger(tab?.id)) throw new Error("无法找到用于小红书博主采集的标签页。");
 
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
   let attached = false;
+  let completed = false;
   try {
     throwIfStopped(session);
-    await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
+    if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
     await attachDebugger(tab.id);
     attached = true;
     await sendCommand(tab.id, "Runtime.enable");
@@ -194,10 +207,12 @@ export async function captureXiaohongshuProfile(options) {
     await sendCommand(tab.id, "Page.navigate", { url: profileUrl });
     await waitForProfilePage(tab.id, session);
     const data = await collectProfileData(tab.id, options.limit, session);
+    completed = true;
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
     if (attached) await detachDebugger(tab.id).catch(() => {});
+    if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
 

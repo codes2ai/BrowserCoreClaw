@@ -7,6 +7,12 @@ import {
   renderTaskDetailModal,
   tagTaskDataRow
 } from "../../../shared/task-detail.js";
+import {
+  DEFAULT_TASK_CONCURRENCY,
+  MAX_TASK_CONCURRENCY,
+  normalizeTaskConcurrency,
+  runConcurrentTasks
+} from "../../../shared/concurrent-task-pool.js";
 
 const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
 const MAX_RECORDS_PER_STATUS = 200;
@@ -25,11 +31,17 @@ const SAMPLE_CONFIG = Object.freeze({
   limit: 20,
   keywordIntervalMinMs: 100,
   keywordIntervalMaxMs: 1000,
+  concurrency: DEFAULT_TASK_CONCURRENCY,
   timeRange: "last_hour",
   language: "zh-CN",
   polling: false,
   pollingMinutes: 10
 });
+
+// 功能页面切换时模块不会重新加载。将实际运行控制器保存在模块级，
+// 让任务脱离某次页面挂载继续执行，并在重新打开功能时恢复控制入口。
+let activeGoogleNewsRun = null;
+const GOOGLE_NEWS_RUN_FINISHED_EVENT = "browser-core-claw-google-news-run-finished";
 
 function cloneSampleConfig() {
   return { ...SAMPLE_CONFIG, keywords: [...SAMPLE_CONFIG.keywords] };
@@ -93,6 +105,7 @@ function normalizeConfig(input) {
     keywords,
     limit: asInteger(input.limit, SAMPLE_CONFIG.limit, 1, 100),
     ...intervalRange,
+    concurrency: normalizeTaskConcurrency(input.concurrency),
     timeRange: "last_hour",
     language: ["zh-CN", "en-US", "ja-JP"].includes(input.language)
       ? input.language
@@ -247,7 +260,12 @@ function isGoogleTab(tab) {
   }
 }
 
-export async function getOrCreateGoogleTab(preferredTabId = null) {
+export async function getOrCreateGoogleTab(preferredTabId = null, isolated = false) {
+  if (isolated) {
+    return callChrome((done) => {
+      chrome.tabs.create({ url: "https://www.google.com/", active: false }, done);
+    });
+  }
   const tabs = await callChrome((done) => {
     chrome.tabs.query({ currentWindow: true }, done);
   });
@@ -260,6 +278,11 @@ export async function getOrCreateGoogleTab(preferredTabId = null) {
   return callChrome((done) => {
     chrome.tabs.create({ url: "https://www.google.com/", active: true }, done);
   });
+}
+
+async function closePluginCreatedGoogleTab(tabId) {
+  if (!Number.isInteger(tabId) || !isExtensionRuntime()) return;
+  await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
 }
 
 function sendMessage(message) {
@@ -281,7 +304,8 @@ function saveState(state) {
   const value = {
     config: state.config,
     records: limitRecordsPerStatus(state.records),
-    dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS)
+    dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS),
+    notice: state.notice
   };
   chrome.storage.local.set({ [STORAGE_KEY]: value }).catch(() => {});
 }
@@ -364,23 +388,29 @@ function renderRunOptions(state) {
       <button class="news-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
         <span class="news-options-title">
           <strong>运行选项</strong>
-          <small>调整条数、间隔、语言和轮询</small>
+          <small>调整条数、并发任务、间隔、语言和轮询</small>
         </span>
         <span class="news-option-summary" aria-label="当前运行选项摘要">
           <span><small>关键词</small><strong>${state.config.keywords.length}</strong></span>
           <span><small>每词条数</small><strong>${state.config.limit}</strong></span>
+          <span><small>并发任务</small><strong>${state.config.concurrency}</strong></span>
           <span><small>关键词间隔</small><strong>${formatKeywordIntervalRange(state.config)}</strong></span>
         </span>
         <span class="news-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span>
       </button>
       ${state.optionsOpen ? `
         <div class="news-options-body">
-          <p class="news-options-note">运行会优先复用 Google 标签页；未找到时自动创建，然后按关键词依次搜索。</p>
+          <p class="news-options-note">每个关键词都是独立任务。并发任务会使用独立的后台标签页；设为 1 时按顺序执行。</p>
           <div class="news-options-grid">
             <label class="news-control">
               <span>每个关键词结果数</span>
               <input type="number" min="1" max="100" value="${state.config.limit}" data-field="limit" ${state.running ? "disabled" : ""}>
               <small>允许 1–100 条，采集后写入数据表格。</small>
+            </label>
+            <label class="news-control">
+              <span>并发任务数</span>
+              <input type="number" min="1" max="${MAX_TASK_CONCURRENCY}" value="${state.config.concurrency}" data-field="concurrency" ${state.running ? "disabled" : ""}>
+              <small>同时采集 ${state.config.concurrency} 个关键词，最多 ${MAX_TASK_CONCURRENCY} 个。</small>
             </label>
             <label class="news-control">
               <span>关键词间隔</span>
@@ -617,7 +647,7 @@ function renderBatchModal(state) {
 
 function renderRunButton(state, className = "") {
   if (state.running) {
-    return `<button class="news-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止"}</button>`;
+    return `<button class="news-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`;
   }
   return `<button class="news-primary-button ${className}" type="button" data-action="run">运行</button>`;
 }
@@ -722,12 +752,12 @@ export async function mountGoogleNewsMonitor(container, context) {
     guideOpen: false,
     taskDetailRecordId: "",
     optionsOpen: false,
-    running: false,
-    stopping: false,
+    running: Boolean(activeGoogleNewsRun),
+    stopping: Boolean(activeGoogleNewsRun?.stopRequested),
     recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
-    notice: !isExtensionRuntime()
+    notice: saved?.notice || (!isExtensionRuntime()
       ? { tone: "info", text: "当前是网页预览：运行会打开 Google 新闻搜索页；数据采集请在 Chrome 中加载扩展后测试。" }
-      : null,
+      : null),
     records: limitRecordsPerStatus(saved?.records),
     dataRows: Array.isArray(saved?.dataRows)
       ? saved.dataRows
@@ -736,7 +766,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       : []
   };
   let disposed = false;
-  let activeRun = null;
+  let activeRun = activeGoogleNewsRun;
 
   const syncJsonDraft = () => {
     state.jsonDraft = JSON.stringify(state.config, null, 2);
@@ -844,11 +874,12 @@ export async function mountGoogleNewsMonitor(container, context) {
     const runStartedAtMs = Date.now();
     const control = {
       runId: `GN-${String(runStartedAtMs).slice(-8)}`,
-      tabId: null,
       stopRequested: false,
-      activeRecord: null
+      activeCaptureRunIds: new Set(),
+      ownedTargetTabIds: new Set()
     };
     activeRun = control;
+    activeGoogleNewsRun = control;
     state.running = true;
     state.stopping = false;
     state.notice = { tone: "info", text: `正在准备 ${keywords.length} 个关键词的 Google 新闻搜索…` };
@@ -903,6 +934,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       state.running = false;
       state.stopping = false;
       activeRun = null;
+      if (activeGoogleNewsRun === control) activeGoogleNewsRun = null;
       state.notice = control.stopRequested
         ? { tone: "warning", text: `网页预览已停止，共打开 ${openedCount} 个关键词。` }
         : previewError
@@ -910,6 +942,7 @@ export async function mountGoogleNewsMonitor(container, context) {
           : { tone: "success", text: `网页预览完成：已按间隔依次打开 ${openedCount} 个关键词；扩展环境会继续采集并回填数据。` };
       saveState(state);
       render();
+      globalThis.dispatchEvent?.(new Event(GOOGLE_NEWS_RUN_FINISHED_EVENT));
       return;
     }
 
@@ -920,75 +953,70 @@ export async function mountGoogleNewsMonitor(container, context) {
         const round = completedRounds + 1;
         let roundFailed = 0;
         let roundAdded = 0;
-        const tab = await getOrCreateGoogleTab(control.tabId);
-        if (!Number.isInteger(tab?.id)) {
-          throw new Error("无法创建用于 Google 新闻采集的标签页。");
-        }
-        control.tabId = tab.id;
+        await runConcurrentTasks(keywords, {
+          concurrency: state.config.concurrency,
+          shouldStop: () => control.stopRequested,
+          worker: async (keyword, index) => {
+            if (index >= state.config.concurrency) {
+              await waitForKeywordInterval(state.config, control, {
+                onWait: (intervalMs) => {
+                  state.notice = { tone: "info", text: `正在准备后续关键词，随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}）…` };
+                  saveState(state);
+                  render();
+                }
+              });
+            }
+            if (control.stopRequested) return;
 
-        for (let index = 0; index < keywords.length; index += 1) {
-          if (control.stopRequested) break;
-          const keyword = keywords[index];
-          const keywordRecord = createKeywordRecord(control, keyword, round, index);
-          control.activeRecord = keywordRecord;
-          state.notice = { tone: "info", text: `第 ${round} 轮，正在搜索 ${index + 1}/${keywords.length}：${keyword}` };
-          saveState(state);
-          render();
-
-          try {
-            const response = await sendMessage({
-              type: MESSAGE_CAPTURE_GOOGLE_NEWS,
-              options: {
-                runId: control.runId,
-                tabId: tab.id,
-                query: keyword,
-                limit: state.config.limit,
-                language: state.config.language
-              }
-            });
-            if (control.stopRequested) {
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
-              break;
-            }
-            if (!response?.ok) {
-              throw new Error(response?.error || "采集失败");
-            }
-            const added = mergeDataRows(state, keyword, response.data, {
-              runId: control.runId,
-              recordId: keywordRecord.record.id
-            });
-            roundAdded += added;
-            addedTotal += added;
-            finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", added);
-          } catch (error) {
-            if (control.stopRequested) {
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
-            } else {
-              const errorText = error.message || String(error);
-              roundFailed += 1;
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
-              state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
-            }
-          } finally {
-            control.activeRecord = null;
+            const keywordRecord = createKeywordRecord(control, keyword, round, index);
+            const captureRunId = keywordRecord.record.id;
+            control.activeCaptureRunIds.add(captureRunId);
+            state.notice = { tone: "info", text: `第 ${round} 轮，正在并发搜索 ${control.activeCaptureRunIds.size}/${state.config.concurrency} 个关键词…` };
             saveState(state);
             render();
-          }
-
-          if (control.stopRequested) break;
-          if (index < keywords.length - 1) {
-            await waitForKeywordInterval(state.config, control, {
-              onWait: (intervalMs) => {
-                state.notice = {
-                  tone: "info",
-                  text: `“${keyword}”已完成，本次随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}），然后搜索“${keywords[index + 1]}”…`
-                };
-                saveState(state);
-                render();
+            try {
+              const tab = await getOrCreateGoogleTab(null, true);
+              if (!Number.isInteger(tab?.id)) throw new Error("无法创建用于 Google 新闻采集的标签页。");
+              control.ownedTargetTabIds.add(tab.id);
+              const response = await sendMessage({
+                type: MESSAGE_CAPTURE_GOOGLE_NEWS,
+                options: {
+                  runId: captureRunId,
+                  tabId: tab.id,
+                  query: keyword,
+                  limit: state.config.limit,
+                  language: state.config.language
+                }
+              });
+              if (control.stopRequested) {
+                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
+                return;
               }
-            });
+              if (!response?.ok) throw new Error(response?.error || "采集失败");
+              await closePluginCreatedGoogleTab(tab.id);
+              control.ownedTargetTabIds.delete(tab.id);
+              const added = mergeDataRows(state, keyword, response.data, {
+                runId: control.runId,
+                recordId: keywordRecord.record.id
+              });
+              roundAdded += added;
+              addedTotal += added;
+              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", added);
+            } catch (error) {
+              if (control.stopRequested) finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
+              else {
+                const errorText = error.message || String(error);
+                roundFailed += 1;
+                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
+              }
+            } finally {
+              control.activeCaptureRunIds.delete(captureRunId);
+              saveState(state);
+              render();
+            }
           }
-        }
+        });
 
         saveState(state);
         if (control.stopRequested) break;
@@ -1020,16 +1048,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       }
     } catch (error) {
       const errorText = error.message || String(error);
-      if (control.activeRecord) {
-        finishRecord(
-          control.activeRecord.record,
-          control.activeRecord.startedAtMs,
-          control.stopRequested ? "stopped" : "error",
-          0,
-          control.stopRequested ? "" : errorText
-        );
-        control.activeRecord = null;
-      } else if (!control.stopRequested) {
+      if (!control.stopRequested) {
         keywords.forEach((keyword, index) => {
           const failedRecord = createKeywordRecord(control, keyword, completedRounds + 1, index);
           finishRecord(failedRecord.record, failedRecord.startedAtMs, "error", 0, errorText);
@@ -1042,6 +1061,9 @@ export async function mountGoogleNewsMonitor(container, context) {
       }
       state.tab = "records";
     } finally {
+      if (activeGoogleNewsRun === control) {
+        activeGoogleNewsRun = null;
+      }
       if (activeRun === control) {
         activeRun = null;
         state.running = false;
@@ -1049,22 +1071,42 @@ export async function mountGoogleNewsMonitor(container, context) {
       }
       saveState(state);
       render();
+      globalThis.dispatchEvent?.(new Event(GOOGLE_NEWS_RUN_FINISHED_EVENT));
     }
   };
 
   const stopRun = async () => {
-    if (!state.running || !activeRun || activeRun.stopRequested) return;
-    activeRun.stopRequested = true;
+    const control = activeRun || activeGoogleNewsRun;
+    if (!state.running || !control || control.stopRequested) return;
+    control.stopRequested = true;
     state.stopping = true;
-    state.notice = { tone: "warning", text: "正在停止任务并释放浏览器连接…" };
+    state.notice = { tone: "warning", text: "正在停止全部并发任务并释放浏览器连接…" };
     render();
 
     if (isExtensionRuntime()) {
-      await sendMessage({
-        type: MESSAGE_STOP_GOOGLE_NEWS,
-        options: { runId: activeRun.runId }
-      });
+      await Promise.all([...control.activeCaptureRunIds].map((runId) => (
+        sendMessage({ type: MESSAGE_STOP_GOOGLE_NEWS, options: { runId } }).catch(() => null)
+      )));
+      await Promise.all([...control.ownedTargetTabIds].map((tabId) => closePluginCreatedGoogleTab(tabId)));
+      control.ownedTargetTabIds.clear();
     }
+  };
+
+  const handleLiveRunFinished = async () => {
+    if (activeGoogleNewsRun || !state.running) return;
+    const latest = await loadSavedState().catch(() => null);
+    state.running = false;
+    state.stopping = false;
+    state.config = latest?.config ? normalizeConfig(latest.config) : state.config;
+    state.records = limitRecordsPerStatus(latest?.records || state.records);
+    state.dataRows = Array.isArray(latest?.dataRows)
+      ? latest.dataRows
+        .map((row) => ({ ...row, description: row.description || row.desc || "" }))
+        .slice(0, MAX_STORED_RESULTS)
+      : state.dataRows;
+    state.notice = latest?.notice || state.notice;
+    syncJsonDraft();
+    render();
   };
 
   const handleClick = (event) => {
@@ -1088,7 +1130,9 @@ export async function mountGoogleNewsMonitor(container, context) {
 
     if (action === "run") {
       startRun().catch((error) => {
+        const failedRun = activeRun;
         activeRun = null;
+        if (activeGoogleNewsRun === failedRun) activeGoogleNewsRun = null;
         state.running = false;
         state.stopping = false;
         state.notice = { tone: "error", text: error.message || String(error) };
@@ -1228,6 +1272,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     }
     const field = event.target.dataset.field;
     if (field === "limit") state.config.limit = asInteger(event.target.value, state.config.limit, 1, 100);
+    if (field === "concurrency") state.config.concurrency = normalizeTaskConcurrency(event.target.value, state.config.concurrency);
     if (field === "keywordIntervalMinMs") state.config.keywordIntervalMinMs = asInteger(event.target.value, state.config.keywordIntervalMinMs, 0, 60000);
     if (field === "keywordIntervalMaxMs") state.config.keywordIntervalMaxMs = asInteger(event.target.value, state.config.keywordIntervalMaxMs, 0, 60000);
     if (field === "pollingMinutes") state.config.pollingMinutes = asInteger(event.target.value, state.config.pollingMinutes, 1, 1440);
@@ -1250,6 +1295,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       return;
     }
     if (field === "language") state.config.language = event.target.value;
+    if (field === "concurrency") state.config.concurrency = normalizeTaskConcurrency(state.config.concurrency);
     if (field === "polling") {
       state.config.polling = event.target.checked;
       render();
@@ -1269,23 +1315,17 @@ export async function mountGoogleNewsMonitor(container, context) {
   container.addEventListener("input", handleInput);
   container.addEventListener("change", handleChange);
   document.addEventListener("keydown", handleKeydown);
+  globalThis.addEventListener?.(GOOGLE_NEWS_RUN_FINISHED_EVENT, handleLiveRunFinished);
   render();
 
   return () => {
-    if (activeRun && !activeRun.stopRequested) {
-      activeRun.stopRequested = true;
-      if (isExtensionRuntime()) {
-        sendMessage({
-          type: MESSAGE_STOP_GOOGLE_NEWS,
-          options: { runId: activeRun.runId }
-        }).catch(() => {});
-      }
-    }
+    // 切换功能页面只卸载界面和事件；正在运行的任务继续保持运行。
     disposed = true;
     container.removeEventListener("click", handleClick);
     container.removeEventListener("input", handleInput);
     container.removeEventListener("change", handleChange);
     document.removeEventListener("keydown", handleKeydown);
+    globalThis.removeEventListener?.(GOOGLE_NEWS_RUN_FINISHED_EVENT, handleLiveRunFinished);
     container.replaceChildren();
   };
 }

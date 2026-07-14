@@ -77,22 +77,59 @@ import {
   MESSAGE_STOP_DOUYIN_POST_DETAIL
 } from "../groups/douyin/post-detail/constants.js";
 
-async function enableActionToOpenSidePanel() {
-  if (!chrome.sidePanel?.setPanelBehavior) {
-    return;
-  }
+const DASHBOARD_PATH = "sidepanel.html";
+let dashboardOpenPromise = null;
 
-  await chrome.sidePanel.setPanelBehavior({
-    openPanelOnActionClick: true
+function callChrome(callbackApi) {
+  return new Promise((resolve, reject) => {
+    callbackApi((result) => {
+      const error = chrome.runtime.lastError;
+      if (error) {
+        reject(new Error(error.message));
+        return;
+      }
+      resolve(result);
+    });
   });
 }
 
-chrome.runtime.onInstalled.addListener(() => {
-  enableActionToOpenSidePanel().catch(console.error);
-});
+function isDashboardTab(tab, dashboardUrl) {
+  return tab?.url === dashboardUrl || tab?.pendingUrl === dashboardUrl;
+}
 
-chrome.runtime.onStartup.addListener(() => {
-  enableActionToOpenSidePanel().catch(console.error);
+async function openOrFocusDashboard() {
+  const dashboardUrl = chrome.runtime.getURL(DASHBOARD_PATH);
+  const tabs = await callChrome((done) => chrome.tabs.query({}, done));
+  const existing = tabs
+    .filter((tab) => isDashboardTab(tab, dashboardUrl))
+    .sort((first, second) => {
+      if (first.active !== second.active) return first.active ? -1 : 1;
+      return (second.lastAccessed || 0) - (first.lastAccessed || 0);
+    })[0];
+
+  if (Number.isInteger(existing?.id)) {
+    if (Number.isInteger(existing.windowId)) {
+      await callChrome((done) => chrome.windows.update(existing.windowId, { focused: true }, done));
+    }
+    return callChrome((done) => chrome.tabs.update(existing.id, { active: true }, done));
+  }
+
+  return callChrome((done) => chrome.tabs.create({ url: dashboardUrl, active: true }, done));
+}
+
+function ensureDashboardOpen() {
+  if (!dashboardOpenPromise) {
+    dashboardOpenPromise = openOrFocusDashboard().finally(() => {
+      dashboardOpenPromise = null;
+    });
+  }
+  return dashboardOpenPromise;
+}
+
+chrome.action.onClicked.addListener(() => {
+  ensureDashboardOpen().catch((error) => {
+    console.error("无法打开 BrowserCoreClaw 控制台：", error);
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

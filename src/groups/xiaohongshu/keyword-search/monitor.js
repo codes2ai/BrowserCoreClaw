@@ -15,6 +15,12 @@ import {
   renderTaskDetailModal,
   tagTaskDataRow
 } from "../../../shared/task-detail.js";
+import {
+  DEFAULT_TASK_CONCURRENCY,
+  MAX_TASK_CONCURRENCY,
+  normalizeTaskConcurrency,
+  runConcurrentTasks
+} from "../../../shared/concurrent-task-pool.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuKeywordV1";
 const MAX_RECORDS_PER_STATUS = 200;
@@ -33,10 +39,15 @@ const SAMPLE_CONFIG = Object.freeze({
   limit: 20,
   keywordIntervalMinMs: 100,
   keywordIntervalMaxMs: 1000,
+  concurrency: DEFAULT_TASK_CONCURRENCY,
   ...normalizeXiaohongshuFilters(),
   polling: false,
   pollingMinutes: 10
 });
+
+// 与 Google 新闻监控相同：功能页面的卸载不应终止仍在执行的采集任务。
+let activeXiaohongshuKeywordRun = null;
+const XIAOHONGSHU_KEYWORD_RUN_FINISHED_EVENT = "browser-core-claw-xiaohongshu-keyword-run-finished";
 
 function cloneSampleConfig() {
   return { ...SAMPLE_CONFIG, keywords: [...SAMPLE_CONFIG.keywords] };
@@ -100,6 +111,7 @@ function normalizeConfig(input) {
     keywords,
     limit: asInteger(input.limit, SAMPLE_CONFIG.limit, 1, 100),
     ...intervalRange,
+    concurrency: normalizeTaskConcurrency(input.concurrency),
     ...normalizeXiaohongshuFilters(input),
     polling: Boolean(input.polling),
     pollingMinutes: asInteger(input.pollingMinutes, SAMPLE_CONFIG.pollingMinutes, 1, 1440)
@@ -264,7 +276,8 @@ function saveState(state) {
   const value = {
     config: state.config,
     records: limitRecordsPerStatus(state.records),
-    dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS)
+    dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS),
+    notice: state.notice
   };
   chrome.storage.local.set({ [STORAGE_KEY]: value }).catch(() => {});
 }
@@ -347,23 +360,29 @@ function renderRunOptions(state) {
       <button class="xhs-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
         <span class="xhs-options-title">
           <strong>运行选项</strong>
-          <small>调整条数、页面筛选、间隔和轮询</small>
+          <small>调整条数、并发任务、页面筛选、间隔和轮询</small>
         </span>
         <span class="xhs-option-summary" aria-label="当前运行选项摘要">
           <span><small>关键词</small><strong>${state.config.keywords.length}</strong></span>
           <span><small>每词条数</small><strong>${state.config.limit}</strong></span>
+          <span><small>并发任务</small><strong>${state.config.concurrency}</strong></span>
           <span><small>关键词间隔</small><strong>${formatKeywordIntervalRange(state.config)}</strong></span>
         </span>
         <span class="xhs-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span>
       </button>
       ${state.optionsOpen ? `
         <div class="xhs-options-body">
-          <p class="xhs-options-note">运行时会按当前登录会话打开搜索页，并依次应用排序、笔记类型、发布时间、搜索范围和位置距离筛选。</p>
+          <p class="xhs-options-note">每个关键词都是独立任务。并发任务使用当前登录会话的独立后台标签页，并分别应用排序、笔记类型、发布时间、搜索范围和位置距离筛选。</p>
           <div class="xhs-options-grid">
             <label class="xhs-control">
               <span>每个关键词结果数</span>
               <input type="number" min="1" max="100" value="${state.config.limit}" data-field="limit" ${state.running ? "disabled" : ""}>
               <small>允许 1–100 条，采集后写入数据表格。</small>
+            </label>
+            <label class="xhs-control">
+              <span>并发任务数</span>
+              <input type="number" min="1" max="${MAX_TASK_CONCURRENCY}" value="${state.config.concurrency}" data-field="concurrency" ${state.running ? "disabled" : ""}>
+              <small>同时采集 ${state.config.concurrency} 个关键词，最多 ${MAX_TASK_CONCURRENCY} 个。</small>
             </label>
             <label class="xhs-control">
               <span>关键词间隔</span>
@@ -598,7 +617,7 @@ function renderBatchModal(state) {
 
 function renderRunButton(state, className = "") {
   if (state.running) {
-    return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止"}</button>`;
+    return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`;
   }
   return `<button class="xhs-primary-button ${className}" type="button" data-action="run">运行</button>`;
 }
@@ -706,10 +725,10 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     guideOpen: false,
     taskDetailRecordId: "",
     optionsOpen: false,
-    running: false,
-    stopping: false,
+    running: Boolean(activeXiaohongshuKeywordRun),
+    stopping: Boolean(activeXiaohongshuKeywordRun?.stopRequested),
     recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
-    notice: { tone: "info", text: "已确认小红书登录状态。设置筛选条件后点击运行，扩展会按页面顺序采集搜索结果。" },
+    notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。设置筛选条件后点击运行，扩展会按页面顺序采集搜索结果。" },
     records: limitRecordsPerStatus(saved?.records),
     dataRows: Array.isArray(saved?.dataRows)
       ? saved.dataRows
@@ -725,7 +744,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       : []
   };
   let disposed = false;
-  let activeRun = null;
+  let activeRun = activeXiaohongshuKeywordRun;
 
   const syncJsonDraft = () => {
     state.jsonDraft = JSON.stringify(state.config, null, 2);
@@ -822,7 +841,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   const startRun = async () => {
     if (state.running) return;
     if (!isExtensionRuntime()) {
-      state.notice = { tone: "error", text: "小红书搜索与数据采集只能在已加载扩展的 Chrome 侧边栏中运行。" };
+      state.notice = { tone: "error", text: "小红书搜索与数据采集只能在已加载扩展的 Chrome 控制台中运行。" };
       render();
       return;
     }
@@ -837,11 +856,11 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     syncJsonDraft();
     const control = {
       runId: "XHS-" + String(Date.now()).slice(-8),
-      tabId: null,
       stopRequested: false,
-      activeRecord: null
+      activeCaptureRunIds: new Set()
     };
     activeRun = control;
+    activeXiaohongshuKeywordRun = control;
     state.running = true;
     state.stopping = false;
     state.notice = { tone: "info", text: `正在准备 ${keywords.length} 个小红书搜索关键词…` };
@@ -854,71 +873,69 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
         const round = completedRounds + 1;
         let roundFailed = 0;
         let roundAdded = 0;
-        for (let index = 0; index < keywords.length; index += 1) {
-          if (control.stopRequested) break;
-          const keyword = keywords[index];
-          const keywordRecord = createKeywordRecord(control, keyword, round, index);
-          control.activeRecord = keywordRecord;
-          state.notice = { tone: "info", text: `第 ${round} 轮，正在搜索 ${index + 1}/${keywords.length}：${keyword}` };
-          saveState(state);
-          render();
+        await runConcurrentTasks(keywords, {
+          concurrency: state.config.concurrency,
+          shouldStop: () => control.stopRequested,
+          worker: async (keyword, index) => {
+            if (index >= state.config.concurrency) {
+              await waitForKeywordInterval(state.config, control, {
+                onWait: (intervalMs) => {
+                  state.notice = { tone: "info", text: `正在准备后续关键词，随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}）…` };
+                  saveState(state);
+                  render();
+                }
+              });
+            }
+            if (control.stopRequested) return;
 
-          try {
-            const response = await sendMessage({
-              type: MESSAGE_CAPTURE_XIAOHONGSHU_KEYWORD,
-              options: {
-                runId: control.runId,
-                tabId: control.tabId,
-                query: keyword,
-                limit: state.config.limit,
-                filters: Object.fromEntries(XIAOHONGSHU_FILTER_GROUPS.map((group) => [
-                  `${group.key}Label`,
-                  getXiaohongshuFilterLabel(group.key, state.config[group.key])
-                ]))
-              }
-            });
-            if (control.stopRequested) {
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
-              break;
-            }
-            if (!response?.ok) throw new Error(response?.error || "小红书采集失败");
-            control.tabId = Number.isInteger(response.tabId) ? response.tabId : control.tabId;
-            const added = mergeDataRows(state, keyword, response.data, {
-              runId: control.runId,
-              recordId: keywordRecord.record.id
-            });
-            roundAdded += added;
-            addedTotal += added;
-            finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", response.data?.results?.length || 0);
-          } catch (error) {
-            if (control.stopRequested) {
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
-            } else {
-              const errorText = error.message || String(error);
-              roundFailed += 1;
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
-              state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
-            }
-          } finally {
-            control.activeRecord = null;
+            const keywordRecord = createKeywordRecord(control, keyword, round, index);
+            const captureRunId = keywordRecord.record.id;
+            control.activeCaptureRunIds.add(captureRunId);
+            state.notice = { tone: "info", text: `第 ${round} 轮，正在并发搜索 ${control.activeCaptureRunIds.size}/${state.config.concurrency} 个关键词…` };
             saveState(state);
             render();
-          }
-
-          if (control.stopRequested) break;
-          if (index < keywords.length - 1) {
-            await waitForKeywordInterval(state.config, control, {
-              onWait: (intervalMs) => {
-                state.notice = {
-                  tone: "info",
-                  text: `“${keyword}”已完成，本次随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}），然后搜索“${keywords[index + 1]}”…`
-                };
-                saveState(state);
-                render();
+            try {
+              const response = await sendMessage({
+                type: MESSAGE_CAPTURE_XIAOHONGSHU_KEYWORD,
+                options: {
+                  runId: captureRunId,
+                  tabId: null,
+                  isolated: true,
+                  query: keyword,
+                  limit: state.config.limit,
+                  filters: Object.fromEntries(XIAOHONGSHU_FILTER_GROUPS.map((group) => [
+                    `${group.key}Label`,
+                    getXiaohongshuFilterLabel(group.key, state.config[group.key])
+                  ]))
+                }
+              });
+              if (control.stopRequested) {
+                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
+                return;
               }
-            });
+              if (!response?.ok) throw new Error(response?.error || "小红书采集失败");
+              const added = mergeDataRows(state, keyword, response.data, {
+                runId: control.runId,
+                recordId: keywordRecord.record.id
+              });
+              roundAdded += added;
+              addedTotal += added;
+              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", response.data?.results?.length || 0);
+            } catch (error) {
+              if (control.stopRequested) finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
+              else {
+                const errorText = error.message || String(error);
+                roundFailed += 1;
+                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
+              }
+            } finally {
+              control.activeCaptureRunIds.delete(captureRunId);
+              saveState(state);
+              render();
+            }
           }
-        }
+        });
 
         saveState(state);
         if (control.stopRequested) break;
@@ -947,15 +964,14 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       }
     } catch (error) {
       const errorText = error.message || String(error);
-      if (control.activeRecord) {
-        finishRecord(control.activeRecord.record, control.activeRecord.startedAtMs, control.stopRequested ? "stopped" : "error", 0, control.stopRequested ? "" : errorText);
-        control.activeRecord = null;
-      }
       state.notice = control.stopRequested
         ? { tone: "warning", text: `任务已停止，停止前新增 ${addedTotal} 条数据。` }
         : { tone: "error", text: errorText };
       state.tab = "records";
     } finally {
+      if (activeXiaohongshuKeywordRun === control) {
+        activeXiaohongshuKeywordRun = null;
+      }
       if (activeRun === control) {
         activeRun = null;
         state.running = false;
@@ -963,19 +979,44 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       }
       saveState(state);
       render();
+      globalThis.dispatchEvent?.(new Event(XIAOHONGSHU_KEYWORD_RUN_FINISHED_EVENT));
     }
   };
 
   const stopRun = async () => {
-    if (!state.running || !activeRun || activeRun.stopRequested) return;
-    activeRun.stopRequested = true;
+    const control = activeRun || activeXiaohongshuKeywordRun;
+    if (!state.running || !control || control.stopRequested) return;
+    control.stopRequested = true;
     state.stopping = true;
-    state.notice = { tone: "warning", text: "正在停止任务并释放小红书页面连接…" };
+    state.notice = { tone: "warning", text: "正在停止全部并发任务并释放小红书页面连接…" };
     render();
-    await sendMessage({
-      type: MESSAGE_STOP_XIAOHONGSHU_KEYWORD,
-      options: { runId: activeRun.runId }
-    });
+    await Promise.all([...control.activeCaptureRunIds].map((runId) => (
+      sendMessage({ type: MESSAGE_STOP_XIAOHONGSHU_KEYWORD, options: { runId } }).catch(() => null)
+    )));
+  };
+
+  const handleLiveRunFinished = async () => {
+    if (activeXiaohongshuKeywordRun || !state.running) return;
+    const latest = await loadSavedState().catch(() => null);
+    state.running = false;
+    state.stopping = false;
+    state.config = latest?.config ? normalizeConfig(latest.config) : state.config;
+    state.records = limitRecordsPerStatus(latest?.records || state.records);
+    state.dataRows = Array.isArray(latest?.dataRows)
+      ? latest.dataRows
+        .map((row) => ({
+          ...row,
+          pageOrder: Number(row.pageOrder) || 0,
+          description: row.description || row.desc || "",
+          author: row.author || row.source || "",
+          likes: row.likes || "",
+          cover: row.cover || ""
+        }))
+        .slice(0, MAX_STORED_RESULTS)
+      : state.dataRows;
+    state.notice = latest?.notice || state.notice;
+    syncJsonDraft();
+    render();
   };
 
   const handleClick = (event) => {
@@ -999,7 +1040,9 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
 
     if (action === "run") {
       startRun().catch((error) => {
+        const failedRun = activeRun;
         activeRun = null;
+        if (activeXiaohongshuKeywordRun === failedRun) activeXiaohongshuKeywordRun = null;
         state.running = false;
         state.stopping = false;
         state.notice = { tone: "error", text: error.message || String(error) };
@@ -1139,6 +1182,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     }
     const field = event.target.dataset.field;
     if (field === "limit") state.config.limit = asInteger(event.target.value, state.config.limit, 1, 100);
+    if (field === "concurrency") state.config.concurrency = normalizeTaskConcurrency(event.target.value, state.config.concurrency);
     if (field === "keywordIntervalMinMs") state.config.keywordIntervalMinMs = asInteger(event.target.value, state.config.keywordIntervalMinMs, 0, 60000);
     if (field === "keywordIntervalMaxMs") state.config.keywordIntervalMaxMs = asInteger(event.target.value, state.config.keywordIntervalMaxMs, 0, 60000);
     if (field === "pollingMinutes") state.config.pollingMinutes = asInteger(event.target.value, state.config.pollingMinutes, 1, 1440);
@@ -1164,6 +1208,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       state.config[field] = event.target.value;
       syncJsonDraft();
     }
+    if (field === "concurrency") state.config.concurrency = normalizeTaskConcurrency(state.config.concurrency);
     if (field === "polling") {
       state.config.polling = event.target.checked;
       render();
@@ -1183,23 +1228,17 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   container.addEventListener("input", handleInput);
   container.addEventListener("change", handleChange);
   document.addEventListener("keydown", handleKeydown);
+  globalThis.addEventListener?.(XIAOHONGSHU_KEYWORD_RUN_FINISHED_EVENT, handleLiveRunFinished);
   render();
 
   return () => {
-    if (activeRun && !activeRun.stopRequested) {
-      activeRun.stopRequested = true;
-      if (isExtensionRuntime()) {
-        sendMessage({
-          type: MESSAGE_STOP_XIAOHONGSHU_KEYWORD,
-          options: { runId: activeRun.runId }
-        }).catch(() => {});
-      }
-    }
+    // 页面切换时保留任务，只有用户点击“停止”才会终止当前运行。
     disposed = true;
     container.removeEventListener("click", handleClick);
     container.removeEventListener("input", handleInput);
     container.removeEventListener("change", handleChange);
     document.removeEventListener("keydown", handleKeydown);
+    globalThis.removeEventListener?.(XIAOHONGSHU_KEYWORD_RUN_FINISHED_EVENT, handleLiveRunFinished);
     container.replaceChildren();
   };
 }

@@ -6,6 +6,12 @@ import {
   waitForProfileInterval
 } from "../xiaohongshu/profile-notes/monitor.js";
 import { getTaskId, getTaskRecordDetails, renderTaskDetailModal, tagTaskDataRow } from "../../shared/task-detail.js";
+import {
+  DEFAULT_TASK_CONCURRENCY,
+  MAX_TASK_CONCURRENCY,
+  normalizeTaskConcurrency,
+  runConcurrentTasks
+} from "../../shared/concurrent-task-pool.js";
 
 const MAX_RECORDS_PER_STATUS = 200;
 const MAX_STORED_RESULTS = 3000;
@@ -16,7 +22,7 @@ const STATUS = Object.freeze({
   error: { label: "失败", tone: "error" },
   stopped: { label: "已停止", tone: "stopped" }
 });
-const DEFAULT_OPTIONS = Object.freeze({ limit: 20, intervalMinMs: 100, intervalMaxMs: 6000, polling: false, pollingMinutes: 10 });
+const DEFAULT_OPTIONS = Object.freeze({ limit: 20, intervalMinMs: 100, intervalMaxMs: 6000, concurrency: DEFAULT_TASK_CONCURRENCY, polling: false, pollingMinutes: 10 });
 const activeRuns = new Map();
 
 function escapeHtml(value) {
@@ -86,6 +92,7 @@ export function createWeiboProfileMonitor(settings) {
     if (!isExtensionRuntime() || !chrome.storage?.local) return;
     const config = {
       limit: state.limit,
+      concurrency: normalizeTaskConcurrency(state.concurrency),
       ...normalizeProfileIntervalRange(state)
     };
     if (supportsPolling) {
@@ -108,7 +115,7 @@ export function createWeiboProfileMonitor(settings) {
     return `${range.intervalMinMs} - ${range.intervalMaxMs} ms`;
   };
   const renderRunButton = (state, className = "") => state.running
-    ? `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止"}</button>`
+    ? `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`
     : `<button class="xhs-primary-button ${className}" type="button" data-action="run">运行</button>`;
   const renderTabs = (state) => [["params", "运行参数"], ["records", `运行记录(${state.records.length})`], ["data", `数据(${state.dataRows.length})`]]
     .map(([id, label]) => `<button class="xhs-tab ${state.tab === id ? "active" : ""}" type="button" role="tab" aria-selected="${state.tab === id}" data-tab="${id}">${label}</button>`).join("");
@@ -116,15 +123,16 @@ export function createWeiboProfileMonitor(settings) {
   const renderOptions = (state) => {
     const disabled = state.running ? "disabled" : "";
     const optionSubtitle = supportsPolling
-      ? (hasLimit ? "结果数量、随机执行间隔与循环监控" : "随机执行间隔与循环监控")
-      : (hasLimit ? "结果数量与随机执行间隔" : "随机执行间隔");
+      ? (hasLimit ? "结果数量、并发任务、随机执行间隔与循环监控" : "并发任务、随机执行间隔与循环监控")
+      : (hasLimit ? "结果数量、并发任务与随机执行间隔" : "并发任务与随机执行间隔");
     const resultSummary = hasLimit
       ? `<span><small>${escapeHtml(settings.limitLabel || "每任务结果数")}</small><strong>${state.limit}</strong></span>`
       : `<span><small>${escapeHtml(settings.singleResultLabel || "每任务资料数")}</small><strong>1</strong></span>`;
     const limitControl = hasLimit ? `<label class="xhs-control"><span>${escapeHtml(settings.limitLabel || "每任务结果数")}</span><input type="number" min="1" max="100" value="${state.limit}" data-field="limit" ${disabled}><small>${escapeHtml(settings.limitHelp || "默认 20 条，保留页面原始顺序。")}</small></label>` : "";
     const pollingSummary = supportsPolling ? `<span><small>循环监控</small><strong>${state.polling ? `${state.pollingMinutes} 分钟` : "关闭"}</strong></span>` : "";
     const pollingControls = supportsPolling ? `<div class="xhs-polling-row"><label class="xhs-switch-control"><input type="checkbox" data-field="polling" ${state.polling ? "checked" : ""} ${disabled}><span><strong>循环监控</strong><small>每轮任务完成后按设定周期再次执行，直到手动停止。</small></span></label><label class="xhs-control compact ${state.polling ? "" : "is-disabled"}"><span>轮询周期</span><div class="xhs-input-with-unit"><input type="number" min="1" max="1440" value="${state.pollingMinutes}" data-field="pollingMinutes" ${state.polling && !state.running ? "" : "disabled"}><span>分钟</span></div></label></div>` : "";
-    return `<section class="xhs-options-card"><button class="xhs-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}"><span aria-hidden="true">⌄</span><span class="xhs-options-title"><strong>运行选项</strong><small>${optionSubtitle}</small></span><span class="xhs-option-summary">${resultSummary}<span><small>执行间隔</small><strong>${intervalSummary(state)}</strong></span>${pollingSummary}</span><span class="xhs-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span></button>${state.optionsOpen ? `<div class="xhs-options-body"><p class="xhs-options-note">${settings.optionsNote || (hasLimit ? "没有额外筛选条件，博文不足设定数量时以页面实际数量为准。" : `每个${subjectLabel}只读取一条公开资料。`)}</p><div class="xhs-options-grid">${limitControl}<label class="xhs-control"><span>${escapeHtml(subjectLabel)}执行间隔</span><div class="xhs-range-inputs"><div class="xhs-input-with-unit"><input type="number" min="100" max="6000" step="50" value="${state.intervalMinMs}" data-field="intervalMinMs" ${disabled}><span>ms</span></div><span class="xhs-range-separator">-</span><div class="xhs-input-with-unit"><input type="number" min="100" max="6000" step="50" value="${state.intervalMaxMs}" data-field="intervalMaxMs" ${disabled}><span>ms</span></div></div><small>每个${escapeHtml(subjectLabel)}完成后，在 ${intervalSummary(state)} 内随机等待。</small></label></div>${pollingControls}</div>` : ""}</section>`;
+    const concurrencyControl = `<label class="xhs-control"><span>并发任务数</span><input type="number" min="1" max="${MAX_TASK_CONCURRENCY}" value="${state.concurrency}" data-field="concurrency" ${disabled}><small>同时采集 ${state.concurrency} 个${escapeHtml(subjectLabel)}；设为 1 时按顺序执行，最多 ${MAX_TASK_CONCURRENCY} 个。</small></label>`;
+    return `<section class="xhs-options-card"><button class="xhs-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}"><span aria-hidden="true">⌄</span><span class="xhs-options-title"><strong>运行选项</strong><small>${optionSubtitle}</small></span><span class="xhs-option-summary">${resultSummary}<span><small>并发任务</small><strong>${state.concurrency}</strong></span><span><small>执行间隔</small><strong>${intervalSummary(state)}</strong></span>${pollingSummary}</span><span class="xhs-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span></button>${state.optionsOpen ? `<div class="xhs-options-body"><p class="xhs-options-note">${settings.optionsNote || (hasLimit ? "每个输入链接都是独立任务；并发任务使用独立标签页，博文不足设定数量时以页面实际数量为准。" : `每个${subjectLabel}只读取一条公开资料，并发任务使用独立标签页。`)}</p><div class="xhs-options-grid">${limitControl}${concurrencyControl}<label class="xhs-control"><span>${escapeHtml(subjectLabel)}执行间隔</span><div class="xhs-range-inputs"><div class="xhs-input-with-unit"><input type="number" min="100" max="6000" step="50" value="${state.intervalMinMs}" data-field="intervalMinMs" ${disabled}><span>ms</span></div><span class="xhs-range-separator">-</span><div class="xhs-input-with-unit"><input type="number" min="100" max="6000" step="50" value="${state.intervalMaxMs}" data-field="intervalMaxMs" ${disabled}><span>ms</span></div></div><small>启动后续任务时，在 ${intervalSummary(state)} 内随机等待。</small></label></div>${pollingControls}</div>` : ""}</section>`;
   };
   const renderParameters = (state) => `<section class="xhs-parameter-card"><div class="xhs-field-heading"><div><label>${escapeHtml(settings.inputLabel || `${platformName}博主主页链接`)}</label><p>${settings.inputDescription || (hasLimit ? "每个主页链接独立采集公开博文，不包含关键词搜索或额外筛选条件。" : `每个主页链接独立采集公开资料；无需先登录${platformName}。`)}</p></div><span>${state.profileUrls.filter(Boolean).length} 个${escapeHtml(subjectLabel)}</span></div><div class="xhs-keyword-list xhs-profile-list">${renderProfileRows(state)}</div><div class="xhs-inline-actions"><button class="xhs-secondary-button emphasized" type="button" data-action="add-profile" ${state.running ? "disabled" : ""}>＋ 添加${escapeHtml(subjectLabel)}</button><button class="xhs-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button></div><p class="xhs-profile-init-note"><strong>采集链路：</strong>${settings.pipelineText}</p></section>${renderOptions(state)}`;
   const renderRecords = (state) => {
@@ -148,7 +156,7 @@ export function createWeiboProfileMonitor(settings) {
     const savedConfig = saved?.config || {};
     const savedRange = normalizeProfileIntervalRange(savedConfig);
     const state = {
-      tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...defaultUrls], records: limitProfileRecordsPerStatus(saved?.records), dataRows: Array.isArray(saved?.dataRows) ? saved.dataRows.slice(0, MAX_STORED_RESULTS) : [], batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100), intervalMinMs: savedRange.intervalMinMs, intervalMaxMs: savedRange.intervalMaxMs, polling: supportsPolling && Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeRuns.get(runScope) && !activeRuns.get(runScope).stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: settings.initialNotice }
+      tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...defaultUrls], records: limitProfileRecordsPerStatus(saved?.records), dataRows: Array.isArray(saved?.dataRows) ? saved.dataRows.slice(0, MAX_STORED_RESULTS) : [], batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100), concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedRange.intervalMinMs, intervalMaxMs: savedRange.intervalMaxMs, polling: supportsPolling && Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeRuns.get(runScope) && !activeRuns.get(runScope).stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: settings.initialNotice }
     };
     let disposed = false;
     let activeRun = activeRuns.get(runScope) || null;
@@ -178,37 +186,78 @@ export function createWeiboProfileMonitor(settings) {
     };
     const startRun = async () => {
       if (state.running) return;
-      if (!isExtensionRuntime()) { state.notice = { tone: "error", text: `${platformName}采集只能在已加载扩展的 Chrome 侧边栏中运行。` }; render(); return; }
+      if (!isExtensionRuntime()) { state.notice = { tone: "error", text: `${platformName}采集只能在已加载扩展的 Chrome 控制台中运行。` }; render(); return; }
       const profileUrls = uniqueUrls(state.profileUrls);
       if (!profileUrls.length) { state.notice = { tone: "error", text: `请至少填写一个${platformName}${subjectLabel}链接。` }; render(); return; }
       const invalidUrl = profileUrls.find((url) => !validTargetUrl(url));
       if (invalidUrl) { state.notice = { tone: "error", text: `${subjectLabel}链接格式不正确：${invalidUrl}` }; render(); return; }
       state.profileUrls = profileUrls;
-      const control = { runId: `${runPrefix}-${String(Date.now()).slice(-8)}`, tabId: null, stopRequested: false, activeRecord: null };
+      const control = {
+        runId: `${runPrefix}-${String(Date.now()).slice(-8)}`,
+        stopRequested: false,
+        activeCaptureRunIds: new Set()
+      };
       activeRun = control; activeRuns.set(runScope, control); state.running = true; state.stopping = false;
       state.notice = { tone: "info", text: `正在准备 ${profileUrls.length} 个${platformName}${subjectLabel}…` }; saveState(state); render();
       let addedTotal = 0; let completedRounds = 0;
       try {
         do {
           const round = completedRounds + 1; let failed = 0;
-          for (let index = 0; index < profileUrls.length; index += 1) {
-            if (control.stopRequested) break;
-            const profileUrl = profileUrls[index]; const current = createRecord(control, profileUrl, round, index); control.activeRecord = current;
-            state.notice = { tone: "info", text: `第 ${round} 轮，正在采集 ${index + 1}/${profileUrls.length} 个${subjectLabel}…` }; saveState(state); render();
-            try {
-              const response = await sendMessage({ type: settings.captureMessage, options: { runId: control.runId, tabId: control.tabId, [targetOptionKey]: profileUrl, ...(hasLimit ? { limit: state.limit } : {}) } });
-              if (control.stopRequested) { finishRecord(current.record.id, current.startedAtMs, "stopped"); break; }
-              if (!response?.ok) throw new Error(response?.error || `${settings.featureName}失败`);
-              control.tabId = Number.isInteger(response.tabId) ? response.tabId : control.tabId;
-              const result = mergeRows(response.data, { runId: control.runId, recordId: current.record.id }, profileUrl);
-              addedTotal += result.added; finishRecord(current.record.id, current.startedAtMs, "success", result.count);
-            } catch (error) {
-              if (control.stopRequested) finishRecord(current.record.id, current.startedAtMs, "stopped");
-              else { failed += 1; const message = error.message || String(error); finishRecord(current.record.id, current.startedAtMs, "error", 0, message); state.notice = { tone: "error", text: `主页采集失败：${message}` }; }
-            } finally { control.activeRecord = null; saveState(state); render(); }
-            if (control.stopRequested) break;
-            if (index < profileUrls.length - 1) await waitForProfileInterval(state, control, { onWait: (milliseconds) => { state.notice = { tone: "info", text: `当前${subjectLabel}已完成，随机等待 ${milliseconds} ms 后采集下一个链接…` }; saveState(state); render(); } });
-          }
+          await runConcurrentTasks(profileUrls, {
+            concurrency: state.concurrency,
+            shouldStop: () => control.stopRequested,
+            worker: async (profileUrl, index) => {
+              if (index >= state.concurrency) {
+                await waitForProfileInterval(state, control, {
+                  onWait: (milliseconds) => {
+                    state.notice = { tone: "info", text: `正在准备后续${subjectLabel}，随机等待 ${milliseconds} ms…` };
+                    saveState(state);
+                    render();
+                  }
+                });
+              }
+              if (control.stopRequested) return;
+
+              const current = createRecord(control, profileUrl, round, index);
+              const captureRunId = current.record.id;
+              control.activeCaptureRunIds.add(captureRunId);
+              state.notice = { tone: "info", text: `第 ${round} 轮，正在并发采集 ${control.activeCaptureRunIds.size}/${state.concurrency} 个${subjectLabel}…` };
+              saveState(state);
+              render();
+              try {
+                const response = await sendMessage({
+                  type: settings.captureMessage,
+                  options: {
+                    runId: captureRunId,
+                    tabId: null,
+                    isolated: true,
+                    [targetOptionKey]: profileUrl,
+                    ...(hasLimit ? { limit: state.limit } : {})
+                  }
+                });
+                if (control.stopRequested) {
+                  finishRecord(current.record.id, current.startedAtMs, "stopped");
+                  return;
+                }
+                if (!response?.ok) throw new Error(response?.error || `${settings.featureName}失败`);
+                const result = mergeRows(response.data, { runId: control.runId, recordId: current.record.id }, profileUrl);
+                addedTotal += result.added;
+                finishRecord(current.record.id, current.startedAtMs, "success", result.count);
+              } catch (error) {
+                if (control.stopRequested) finishRecord(current.record.id, current.startedAtMs, "stopped");
+                else {
+                  failed += 1;
+                  const message = error.message || String(error);
+                  finishRecord(current.record.id, current.startedAtMs, "error", 0, message);
+                  state.notice = { tone: "error", text: `${subjectLabel}采集失败：${message}` };
+                }
+              } finally {
+                control.activeCaptureRunIds.delete(captureRunId);
+                saveState(state);
+                render();
+              }
+            }
+          });
           if (control.stopRequested) break;
           completedRounds = round;
           if (!supportsPolling || !state.polling) { state.notice = { tone: failed ? "warning" : "success", text: `运行结束：新增 ${addedTotal} 条${rowLabel}数据，失败 ${failed} 个主页。` }; state.tab = addedTotal ? "data" : "records"; break; }
@@ -218,7 +267,6 @@ export function createWeiboProfileMonitor(settings) {
         if (control.stopRequested) { state.notice = { tone: "warning", text: `任务已停止，共完成 ${completedRounds} 轮，新增 ${addedTotal} 条${rowLabel}数据。` }; state.tab = "records"; }
       } catch (error) {
         const message = error.message || String(error);
-        if (control.activeRecord) finishRecord(control.activeRecord.record.id, control.activeRecord.startedAtMs, control.stopRequested ? "stopped" : "error", 0, control.stopRequested ? "" : message);
         state.notice = control.stopRequested ? { tone: "warning", text: "任务已停止。" } : { tone: "error", text: message }; state.tab = "records";
       } finally {
         if (activeRuns.get(runScope) === control) activeRuns.delete(runScope);
@@ -229,8 +277,10 @@ export function createWeiboProfileMonitor(settings) {
     const stopRun = async () => {
       const control = activeRun || activeRuns.get(runScope);
       if (!state.running || !control || control.stopRequested) return;
-      control.stopRequested = true; state.stopping = true; state.notice = { tone: "warning", text: `正在停止任务并释放${platformName}页面连接…` }; render();
-      await sendMessage({ type: settings.stopMessage, options: { runId: control.runId } });
+      control.stopRequested = true; state.stopping = true; state.notice = { tone: "warning", text: `正在停止全部并发任务并释放${platformName}页面连接…` }; render();
+      await Promise.all([...control.activeCaptureRunIds].map((runId) => (
+        sendMessage({ type: settings.stopMessage, options: { runId } }).catch(() => null)
+      )));
     };
     const handleLiveRunFinished = async () => {
       if (activeRuns.get(runScope) || !state.running) return;
@@ -259,7 +309,7 @@ export function createWeiboProfileMonitor(settings) {
         case "clear-data": state.dataRows = []; saveState(state); render(); break;
         case "export-json": settings.downloadData(state.dataRows, "json"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` }; render(); break;
         case "export-csv": settings.downloadData(state.dataRows, "csv"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` }; render(); break;
-        case "reset": Object.assign(state, { profileUrls: [...defaultUrls], limit: DEFAULT_OPTIONS.limit, intervalMinMs: DEFAULT_OPTIONS.intervalMinMs, intervalMaxMs: DEFAULT_OPTIONS.intervalMaxMs, polling: false, pollingMinutes: DEFAULT_OPTIONS.pollingMinutes, optionsOpen: false, notice: { tone: "success", text: "已还原主页输入与基础运行选项。" } }); saveState(state); render(); break;
+        case "reset": Object.assign(state, { profileUrls: [...defaultUrls], limit: DEFAULT_OPTIONS.limit, concurrency: DEFAULT_OPTIONS.concurrency, intervalMinMs: DEFAULT_OPTIONS.intervalMinMs, intervalMaxMs: DEFAULT_OPTIONS.intervalMaxMs, polling: false, pollingMinutes: DEFAULT_OPTIONS.pollingMinutes, optionsOpen: false, notice: { tone: "success", text: "已还原主页输入与基础运行选项。" } }); saveState(state); render(); break;
         default: break;
       }
     };
@@ -268,6 +318,7 @@ export function createWeiboProfileMonitor(settings) {
       if (event.target.matches("[data-batch-input]")) state.batchDraft = event.target.value;
       const field = event.target.dataset.field;
       if (field === "limit") state.limit = asInteger(event.target.value, state.limit, 1, 100);
+      if (field === "concurrency") state.concurrency = normalizeTaskConcurrency(event.target.value, state.concurrency);
       if (field === "intervalMinMs") state.intervalMinMs = asInteger(event.target.value, state.intervalMinMs, 100, 6000);
       if (field === "intervalMaxMs") state.intervalMaxMs = asInteger(event.target.value, state.intervalMaxMs, 100, 6000);
       if (supportsPolling && field === "pollingMinutes") state.pollingMinutes = asInteger(event.target.value, state.pollingMinutes, 1, 1440);
@@ -278,7 +329,7 @@ export function createWeiboProfileMonitor(settings) {
       const field = event.target.dataset.field;
       if (field === "intervalMinMs" || field === "intervalMaxMs") Object.assign(state, normalizeProfileIntervalRange(state));
       if (supportsPolling && field === "polling") state.polling = event.target.checked;
-      if (["limit", "intervalMinMs", "intervalMaxMs", ...(supportsPolling ? ["polling", "pollingMinutes"] : [])].includes(field)) { saveState(state); render(); }
+      if (["limit", "concurrency", "intervalMinMs", "intervalMaxMs", ...(supportsPolling ? ["polling", "pollingMinutes"] : [])].includes(field)) { saveState(state); render(); }
     };
     const handleKeydown = (event) => { if (event.key === "Escape" && (state.batchOpen || state.guideOpen || state.taskDetailRecordId)) closeModal(); };
     container.addEventListener("click", handleClick); container.addEventListener("input", handleInput); container.addEventListener("change", handleChange); document.addEventListener("keydown", handleKeydown); globalThis.addEventListener?.(eventName, handleLiveRunFinished); render();

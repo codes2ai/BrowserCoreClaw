@@ -77,7 +77,7 @@ function gateTemplate(state, context) {
           </button>
         </div>
         ${isError ? '<p class="xhs-login-hint">若页面尚在加载，请稍候后重新检测。</p>' : ""}
-        ${isUnavailable ? '<p class="xhs-login-hint">请在已安装 BrowserCoreClaw 的 Chrome 扩展侧边栏中打开此功能。</p>' : ""}
+        ${isUnavailable ? '<p class="xhs-login-hint">请在已安装 BrowserCoreClaw 的 Chrome 扩展控制台中打开此功能。</p>' : ""}
       </div>
     </section>
   `;

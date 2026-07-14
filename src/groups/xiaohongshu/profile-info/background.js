@@ -24,7 +24,12 @@ function callChrome(callbackApi) {
   });
 }
 
-async function getXiaohongshuTab(preferredTabId = null) {
+async function closePluginCreatedTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
+}
+
+async function getXiaohongshuTab(preferredTabId = null, isolated = false) {
   if (Number.isInteger(preferredTabId)) {
     try {
       const tab = await callChrome((done) => chrome.tabs.get(preferredTabId, done));
@@ -32,6 +37,9 @@ async function getXiaohongshuTab(preferredTabId = null) {
     } catch {
       // The prior task tab may have been closed.
     }
+  }
+  if (isolated) {
+    return callChrome((done) => chrome.tabs.create({ url: XIAOHONGSHU_HOME_URL, active: false }, done));
   }
   const tabs = await callChrome((done) => chrome.tabs.query({ url: XIAOHONGSHU_URL_PATTERNS }, done));
   const tab = [...tabs].sort((first, second) => {
@@ -107,14 +115,19 @@ export async function captureXiaohongshuProfileInfo(options) {
     throw new Error("博主主页链接必须是 https://www.xiaohongshu.com/user/profile/... 格式。");
   }
   if (!runId) throw new Error("缺少运行任务编号。");
-  const tab = await getXiaohongshuTab(Number(options.tabId));
+  const parsedTabId = Number(options.tabId);
+  const hasRequestedTab = Number.isInteger(parsedTabId) && parsedTabId > 0;
+  const requestedTabId = hasRequestedTab ? parsedTabId : null;
+  const ownsTargetTab = Boolean(options.isolated) && !hasRequestedTab;
+  const tab = await getXiaohongshuTab(requestedTabId, Boolean(options.isolated));
   if (!Number.isInteger(tab?.id)) throw new Error("无法找到用于小红书博主信息采集的标签页。");
 
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
   let attached = false;
+  let completed = false;
   try {
-    await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
+    if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
     await attachDebugger(tab.id);
     attached = true;
     await sendCommand(tab.id, "Runtime.enable");
@@ -125,10 +138,12 @@ export async function captureXiaohongshuProfileInfo(options) {
     throwIfStopped(session);
     const data = await evaluate(tab.id, `(${runXiaohongshuProfileInfoPageCommand.toString()})("extract")`);
     if (!data?.profile?.profileId && !data?.profile?.nickname) throw new Error("未读取到博主资料，请确认主页可访问。");
+    completed = true;
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
     if (attached) await detachDebugger(tab.id).catch(() => {});
+    if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
 

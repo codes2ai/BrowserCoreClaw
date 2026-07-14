@@ -1,7 +1,8 @@
 .xhs-monitor {
-  --xhs-blue: #e3314f;
-  --xhs-blue-dark: #bd1837;
-  --xhs-blue-soft: #ffedf1;
+  /* 全部采集功能统一使用 Google 新闻监控的待运行蓝色。 */
+  --xhs-blue: #2f73e8;
+  --xhs-blue-dark: #1f5ec7;
+  --xhs-blue-soft: #edf4ff;
   --xhs-ink: #172035;
   --xhs-muted: #69748a;
   --xhs-line: #dce3ee;
@@ -15,9 +16,9 @@
 }
 
 .xhs-login-gate {
-  --xhs-blue: #e3314f;
-  --xhs-blue-dark: #bd1837;
-  --xhs-blue-soft: #ffedf1;
+  --xhs-blue: #2f73e8;
+  --xhs-blue-dark: #1f5ec7;
+  --xhs-blue-soft: #edf4ff;
   --xhs-ink: #172035;
   --xhs-muted: #69748a;
   --xhs-line: #dce3ee;
@@ -34,7 +35,7 @@
 }
 
 .xhs-login-gate button:focus-visible {
-  outline: 3px solid rgba(227, 49, 79, 0.2);
+  outline: 3px solid rgba(47, 115, 232, 0.2);
   outline-offset: 2px;
 }
 
@@ -66,7 +67,7 @@
 .xhs-login-status.error {
   border-color: #f4cbd4;
   background: #fff2f5;
-  color: #bd1837;
+  color: #b83d3d;
 }
 
 .xhs-login-status.checking {
@@ -93,7 +94,7 @@
   color: #ffffff;
   font-size: 12px;
   font-weight: 800;
-  box-shadow: 0 10px 22px rgba(227, 49, 79, 0.22);
+  box-shadow: 0 10px 22px rgba(47, 115, 232, 0.22);
 }
 
 .xhs-login-gate-body h2 {
@@ -115,9 +116,9 @@
   gap: 8px;
   padding: 15px 18px 15px 36px;
   margin: 25px auto 0;
-  border: 1px solid #f1d6dd;
+  border: 1px solid #dbe4f3;
   border-radius: 12px;
-  background: #fff8f9;
+  background: #f8faff;
   color: #5c6577;
   font-size: 12px;
   line-height: 1.55;
