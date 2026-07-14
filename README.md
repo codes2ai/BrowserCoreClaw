@@ -1,124 +1,82 @@
 # BrowserCoreClaw
 
-BrowserCoreClaw 是一个以 Chrome 浏览器为运行环境的数据采集工具箱。项目使用 Manifest V3，主界面由 JSON 配置生成，功能代码按“分组/具体功能”独立存放。
+BrowserCoreClaw 是一个运行在 Chrome 侧边栏中的浏览器数据采集工具箱。项目采用 Manifest V3，首页由 JSON 配置生成，并以“平台分组 / 独立功能目录”组织代码与文档。
 
-当前版本完成了项目骨架和 3 个平台分组：
+当前提供 4 个平台分组、10 个功能：Google 新闻监控；微博博主博文、博主信息、正文采集；抖音博主博文、博主信息、博文采集；小红书关键词搜索、博主博文、博主信息采集。
 
-- Google：Google 新闻监控、Google 网页搜索
-- 微博：微博主页博文、微博正文详情
-- 小红书：关键词搜索、博主博文采集、博主信息采集
+## 架构
 
-其中 Google 新闻监控、小红书关键词搜索、小红书博主博文采集和小红书博主信息采集已接入真实浏览器采集链路。小红书功能会先检查当前 Chrome Profile 的登录状态；其余功能目前仍是可进入的独立占位页面。
+- `src/config/groups.json` 是功能列表唯一配置源：定义分组、功能名称、入口和样式。
+- `src/groups/<platform>/<feature>/` 是功能的独立实现目录：入口、监控界面、后台采集、导出和样式彼此隔离。
+- `src/background/service-worker.js` 负责将侧边栏消息路由至各功能后台采集器。
+- `src/background/debugger-client.js` 封装 Chrome Debugger API，用于导航、等待页面稳定并读取公开页面内容。
+- `src/shared/` 放置跨平台可复用的任务明细能力；运行记录、数据表和导出状态保存在 `chrome.storage.local`。
 
 ## 目录结构
 
 ```text
 BrowserCoreClaw/
-  manifest.json
-  sidepanel.html
-  src/
-    config/
-      groups.json                 # 主界面的分组与功能配置
-    app/
-      app.js                      # 配置加载、列表渲染与功能路由
-      app.css
-    background/
-      debugger-client.js          # Chrome Debugger API 封装
-      service-worker.js
-    shared/
-      feature-placeholder.js
-    groups/
-      google/
-        google-news/
-          background.js           # 标签页导航、等待和页面采集
-          constants.js
-          index.js
-          monitor.js              # 功能状态、模板与交互逻辑
-          page-extract.js         # Google 新闻结果解析
-          search-url.js           # 搜索 URL 构建
-          styles.css
-        web-search/
-      weibo/
-        profile-posts/
-        post-detail/
-      xiaohongshu/
-        keyword-search/
-        profile-notes/
-  scripts/
-    validate.mjs
-    package-extension.sh
+├── doc/                                      # 功能说明文档
+│   ├── google/
+│   │   └── google-news.md                     # Google 新闻监控
+│   ├── weibo/
+│   │   ├── profile-posts.md                   # 微博博主博文采集
+│   │   ├── profile-info.md                    # 微博博主信息采集
+│   │   └── post-detail.md                     # 微博正文采集
+│   ├── douyin/
+│   │   ├── profile-posts.md                   # 抖音博主博文采集
+│   │   ├── profile-info.md                    # 抖音博主信息采集
+│   │   └── post-detail.md                     # 抖音博文采集
+│   └── xiaohongshu/
+│       ├── keyword-search.md                  # 小红书关键词搜索
+│       ├── profile-notes.md                   # 小红书博主博文采集
+│       └── profile-info.md                    # 小红书博主信息采集
+├── manifest.json                              # Chrome 扩展清单与站点权限
+├── sidepanel.html                             # 侧边栏页面
+├── src/
+│   ├── app/                                   # 首页配置加载、路由与通用界面
+│   ├── background/                            # Debugger 封装与消息路由
+│   ├── config/groups.json                     # 分组与功能配置
+│   ├── groups/<platform>/<feature>/           # 平台 / 功能独立代码
+│   └── shared/                                # 跨功能任务明细等共享能力
+└── scripts/                                   # 配置校验与打包脚本
 ```
 
-## 增加分组或功能
+## 功能文档
 
-1. 在 `src/groups/<platform-id>/<feature-id>/` 新建独立功能目录。
-2. 目录至少提供一个导出 `mount(container, context)` 的 `index.js`。
-3. 在 `src/config/groups.json` 中增加分组或功能项。
-4. 执行 `npm run check` 验证配置、入口文件和 JavaScript 语法。
+| 平台 | 功能 | 文档 |
+| --- | --- | --- |
+| Google | Google 新闻监控 | [查看说明](doc/google/google-news.md) |
+| 微博 | 微博博主博文采集 | [查看说明](doc/weibo/profile-posts.md) |
+| 微博 | 微博博主信息采集 | [查看说明](doc/weibo/profile-info.md) |
+| 微博 | 微博正文采集 | [查看说明](doc/weibo/post-detail.md) |
+| 抖音 | 抖音博主博文采集 | [查看说明](doc/douyin/profile-posts.md) |
+| 抖音 | 抖音博主信息采集 | [查看说明](doc/douyin/profile-info.md) |
+| 抖音 | 抖音博文采集 | [查看说明](doc/douyin/post-detail.md) |
+| 小红书 | 关键词搜索 | [查看说明](doc/xiaohongshu/keyword-search.md) |
+| 小红书 | 小红书博主博文采集 | [查看说明](doc/xiaohongshu/profile-notes.md) |
+| 小红书 | 小红书博主信息采集 | [查看说明](doc/xiaohongshu/profile-info.md) |
 
-一级分组统一表示数据来源平台，不使用“搜索”“媒体”等能力类型作为分组。主页不包含具体平台的硬编码逻辑；只要配置里的 `entry` 和 `style` 指向对应的平台功能目录，主页就会自动显示并加载该功能。
+## 增加功能
 
-## Google 新闻监控
+1. 在 `src/groups/<platform-id>/<feature-id>/` 建立独立功能目录，并导出 `mount(container, context)`。
+2. 按需提供 `background.js`、`constants.js`、`monitor.js`、`export-data.js` 和 `styles.css`。
+3. 在 `src/config/groups.json` 中注册功能的 `entry` 与 `style`。
+4. 在 `src/background/service-worker.js` 注册采集与停止消息。
+5. 在 `doc/<platform-id>/<feature-id>.md` 新建功能说明，并同步更新本 README 的目录与文档表。
+6. 执行 `npm run check` 验证配置和入口，执行 `npm run package` 生成扩展包。
 
-- 默认提供 `OpenAI`、`人工智能` 两个示例关键词。
-- 支持逐条输入、添加、删除，以及通过弹窗批量编辑关键词。
-- 支持表单和 JSON 两种参数编辑方式，并进行基础格式校验。
-- 使用说明从工作区页签移到功能标题右侧，通过紧凑的问号入口打开弹窗，不离开当前参数或数据页面。
-- 运行选项包含每词结果数、关键词随机间隔区间（毫秒）、最近一小时时间范围、语言和轮询周期；例如 `100 - 1000 ms` 会在每个关键词完成后重新随机取值，并提示本次实际等待时间和下一个关键词。
-- 每次关键词采集都会生成一条独立运行记录，包含关键词、轮次、状态、数据量和耗时。
-- 运行记录支持按关键词和状态筛选；运行中、完成、部分完成、失败、已停止和网页预览等每一种状态分别最多保留 200 条。
-- 采集结果显示在独立的可滚动“数据”表格中，包含关键词、标题、描述、来源、发布时间和链接。
-- “运行参数”“运行记录”和“数据”页的操作按钮固定在工作区底部，内容会根据侧边栏可用高度自动伸缩并在内部滚动。
-- 返回功能列表时不会卸载当前功能，采集和循环监控会继续执行；重新进入 Google 新闻监控时恢复原界面与运行状态。
-- 点击运行会优先复用 Google 标签页；没有 Google 页面时自动创建，再依次导航到 `Google 搜索 + 新闻模式 + 最近一小时` 并读取结果。
-- 数据支持导出为 JSON 和带 UTF-8 BOM 的 CSV 表格文件。
-- 循环监控会在每轮结束后等待设定周期，再自动开始下一轮，直到点击停止、切换到其他功能或关闭侧边栏。
-- 配置、每种状态最多 200 条运行记录和最多 3000 条采集结果保存在 `chrome.storage.local`。
-- 运行期间参数与运行入口会锁定，按钮切换为“停止”；停止会终止后续关键词并释放当前浏览器调试连接。
+一级分组只代表数据来源平台，不按“搜索”“媒体”等能力类型分组。新增站点权限时，需要在 `chrome://extensions/` 重新加载扩展并确认权限。
 
-> `http://127.0.0.1:4173` 网页预览只能检查界面和搜索 URL。真实页面采集依赖扩展的 `tabs`、`debugger` 和 Google 主机权限，必须在 Chrome 扩展环境中运行。
+## 本地加载与打包
 
-## 小红书关键词搜索（初始化）
-
-- 首次进入会打开或复用小红书标签页，并以页面可见的登录入口检测当前 Chrome Profile 的登录状态；未登录、页面需要安全验证或无法确认时，不显示搜索参数和运行入口。
-- 未登录时会显示登录门禁。请自行在小红书标签页完成账号登录、验证码或扫码，再回到扩展点击“重新检测”；扩展不会代填账号凭据或绕过验证。
-- 已完成与 Google 新闻监控一致的关键词参数、批量编辑、JSON 编辑、随机间隔、循环监控、运行记录、数据表、导出、固定操作栏和使用说明弹窗结构。
-- 默认关键词为“穿搭”“护肤”，关键词间隔默认随机范围为 `100 - 1000 ms`。
-- 运行会复用已确认登录的小红书标签页，按关键词依次打开搜索页，应用排序依据、笔记类型、发布时间、搜索范围和位置距离筛选，再滚动加载并采集页面笔记卡片。
-- 数据按页面卡片的原始顺序保存，包含顺序、封面、标题、页面可见文本、作者、发布时间、点赞、链接与采集时间；JSON、CSV 导出也保留该顺序字段。
-- 小红书网页结构变更或出现安全验证时，本次关键词会记录失败原因；请完成页面验证后重新运行。
-
-## 小红书博主博文采集
-
-- 输入一个或多个小红书博主主页链接（`/user/profile/<id>`），每个主页均生成独立运行记录，可按主页与状态筛选，并在任务明细中查看失败原因。
-- 运行会复用已登录的小红书标签页，打开输入的主页 URL，确认笔记列表稳定后才开始读取；出现登录失效或安全验证时会停止当前主页并保留错误信息。
-- 只采集主页笔记卡片字段：主页原始顺序、笔记 ID、标题、作者、点赞数、封面和笔记链接。不会采集或保存博主资料。结果不足设定条数时，按实际可见公开笔记保存。
-- 笔记会按主页卡片顺序保存，以笔记链接去重；当初始列表不足设定条数时，程序自动滚动加载，连续多次没有新笔记时停止，避免无限滚动。
-- 支持每主页 1–100 条笔记、`100 - 6000 ms` 随机主页间隔、循环监控、JSON/CSV 导出；数据最多本地保存 3000 条，每种运行状态最多保存 200 条记录。
-- 在任务运行时返回功能列表不会主动终止当前侧边栏任务；再次进入功能可继续查看已保存的进度、记录和数据。
-
-## 小红书博主信息采集
-
-- 输入一个或多个小红书博主主页链接（`/user/profile/<id>`），每个主页建立独立任务，不读取任何博文卡片。
-- 资料区稳定后采集头像、昵称、小红书号、IP 属地、简介、标签、关注数、粉丝数、获赞与收藏数。
-- 支持随机主页间隔、循环监控、运行记录筛选、任务错误明细、JSON/CSV 导出；每个主页仅保留一条最新资料。
-
-## 本地运行
-
-1. 打开 `chrome://extensions/`。
-2. 开启“开发者模式”。
-3. 点击“加载已解压的扩展程序”。
-4. 选择本项目根目录。
-5. 点击扩展图标打开 Chrome 右侧面板。
-6. 打开一个普通网页标签页，在 Google 新闻监控中输入关键词并点击“运行”。
-
-版本升级后如果 `manifest.json` 增加了权限，需要在 `chrome://extensions/` 中重新加载扩展并确认权限。
-
-## 校验与打包
+1. 打开 `chrome://extensions/` 并开启“开发者模式”。
+2. 选择“加载已解压的扩展程序”，指定本项目根目录。
+3. 点击扩展图标，打开 Chrome 右侧面板。
 
 ```bash
 npm run check
 npm run package
 ```
 
-打包结果输出到 `dist/BrowserCoreClaw-<version>.zip`。
+打包结果输出至 `dist/BrowserCoreClaw-<version>.zip`。
