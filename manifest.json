@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "BrowserCoreClaw",
+  "version": "0.4.4",
+  "description": "A configurable browser data collection toolbox.",
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.google.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "打开 BrowserCoreClaw"
+  }
+}

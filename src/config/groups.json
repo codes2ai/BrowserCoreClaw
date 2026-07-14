@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "app": {
+    "name": "BrowserCoreClaw",
+    "title": "浏览器数据采集中心",
+    "description": "按数据来源平台组织浏览器采集能力。"
+  },
+  "groups": [
+    {
+      "id": "google",
+      "name": "Google",
+      "description": "围绕 Google 搜索和资讯产品组织数据采集能力。",
+      "icon": "GO",
+      "features": [
+        {
+          "id": "google-news",
+          "name": "Google 新闻监控",
+          "description": "按关键词持续采集 Google 新闻结果，支持循环监控、增量去重和数据导出。",
+          "status": "beta",
+          "entry": "src/groups/google/google-news/index.js",
+          "style": "src/groups/google/google-news/styles.css"
+        },
+        {
+          "id": "web-search",
+          "name": "Google 网页搜索",
+          "description": "按关键词采集网页搜索结果、标题、摘要和来源链接。",
+          "status": "scaffold",
+          "entry": "src/groups/google/web-search/index.js",
+          "style": "src/groups/google/web-search/styles.css"
+        }
+      ]
+    },
+    {
+      "id": "weibo",
+      "name": "微博",
+      "description": "采集微博主页、博文详情和相关公开数据。",
+      "icon": "WB",
+      "features": [
+        {
+          "id": "profile-posts",
+          "name": "微博主页博文",
+          "description": "采集微博主页的博文、时间、媒体资源和互动数据。",
+          "status": "scaffold",
+          "entry": "src/groups/weibo/profile-posts/index.js",
+          "style": "src/groups/weibo/profile-posts/styles.css"
+        },
+        {
+          "id": "post-detail",
+          "name": "微博正文详情",
+          "description": "根据微博正文地址采集作者、正文、媒体和互动详情。",
+          "status": "scaffold",
+          "entry": "src/groups/weibo/post-detail/index.js",
+          "style": "src/groups/weibo/post-detail/styles.css"
+        }
+      ]
+    },
+    {
+      "id": "xiaohongshu",
+      "name": "小红书",
+      "description": "采集小红书搜索、用户主页和公开笔记数据。",
+      "icon": "XHS",
+      "features": [
+        {
+          "id": "keyword-search",
+          "name": "关键词搜索",
+          "description": "按关键词采集笔记列表，并为滚动加载和去重预留能力。",
+          "status": "scaffold",
+          "entry": "src/groups/xiaohongshu/keyword-search/index.js",
+          "style": "src/groups/xiaohongshu/keyword-search/styles.css"
+        },
+        {
+          "id": "profile-notes",
+          "name": "用户主页笔记",
+          "description": "根据用户主页地址采集公开笔记、作者和媒体数据。",
+          "status": "scaffold",
+          "entry": "src/groups/xiaohongshu/profile-notes/index.js",
+          "style": "src/groups/xiaohongshu/profile-notes/styles.css"
+        }
+      ]
+    }
+  ]
+}

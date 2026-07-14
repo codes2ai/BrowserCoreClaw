@@ -1,0 +1,10 @@
+{
+  "name": "browser-core-claw",
+  "version": "0.4.4",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/validate.mjs",
+    "package": "npm run check && sh scripts/package-extension.sh"
+  }
+}
