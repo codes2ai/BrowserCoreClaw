@@ -1,6 +1,14 @@
-import { MESSAGE_CAPTURE_GOOGLE_NEWS, MESSAGE_STOP_GOOGLE_NEWS } from "./constants.js";
-import { downloadGoogleNewsData } from "./export-data.js";
-import { buildGoogleNewsSearchUrl } from "./search-url.js";
+import { downloadXiaohongshuKeywordData } from "./export-data.js";
+import {
+  MESSAGE_CAPTURE_XIAOHONGSHU_KEYWORD,
+  MESSAGE_STOP_XIAOHONGSHU_KEYWORD
+} from "./constants.js";
+import {
+  getXiaohongshuFilterLabel,
+  getXiaohongshuFilterSummary,
+  normalizeXiaohongshuFilters,
+  XIAOHONGSHU_FILTER_GROUPS
+} from "./filter-options.js";
 import {
   getTaskRecordDetails,
   getTaskId,
@@ -8,7 +16,7 @@ import {
   tagTaskDataRow
 } from "../../../shared/task-detail.js";
 
-const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
+const STORAGE_KEY = "browserCoreClawXiaohongshuKeywordV1";
 const MAX_RECORDS_PER_STATUS = 200;
 const MAX_STORED_RESULTS = 3000;
 const ALL_RECORD_FILTER = "__all__";
@@ -18,15 +26,14 @@ const RECORD_STATUS_META = Object.freeze({
   partial: { label: "部分完成", tone: "warning" },
   error: { label: "失败", tone: "error" },
   stopped: { label: "已停止", tone: "stopped" },
-  preview: { label: "已打开搜索页", tone: "preview" }
+  preview: { label: "待接入", tone: "preview" }
 });
 const SAMPLE_CONFIG = Object.freeze({
-  keywords: ["OpenAI", "人工智能"],
+  keywords: ["穿搭", "护肤"],
   limit: 20,
   keywordIntervalMinMs: 100,
   keywordIntervalMaxMs: 1000,
-  timeRange: "last_hour",
-  language: "zh-CN",
+  ...normalizeXiaohongshuFilters(),
   polling: false,
   pollingMinutes: 10
 });
@@ -93,10 +100,7 @@ function normalizeConfig(input) {
     keywords,
     limit: asInteger(input.limit, SAMPLE_CONFIG.limit, 1, 100),
     ...intervalRange,
-    timeRange: "last_hour",
-    language: ["zh-CN", "en-US", "ja-JP"].includes(input.language)
-      ? input.language
-      : SAMPLE_CONFIG.language,
+    ...normalizeXiaohongshuFilters(input),
     polling: Boolean(input.polling),
     pollingMinutes: asInteger(input.pollingMinutes, SAMPLE_CONFIG.pollingMinutes, 1, 1440)
   };
@@ -238,30 +242,9 @@ function callChrome(callbackApi) {
   });
 }
 
-function isGoogleTab(tab) {
-  try {
-    const url = new URL(tab?.url || "");
-    return url.protocol === "https:" && /(^|\.)google\.com$/i.test(url.hostname);
-  } catch {
-    return false;
-  }
-}
-
-export async function getOrCreateGoogleTab(preferredTabId = null) {
-  const tabs = await callChrome((done) => {
-    chrome.tabs.query({ currentWindow: true }, done);
-  });
-  const preferred = tabs.find((tab) => tab.id === preferredTabId && isGoogleTab(tab));
-  const existing = preferred || tabs.find((tab) => tab.active && isGoogleTab(tab)) || tabs.find(isGoogleTab);
-  if (existing) {
-    return existing;
-  }
-
-  return callChrome((done) => {
-    chrome.tabs.create({ url: "https://www.google.com/", active: true }, done);
-  });
-}
-
+// Keep the side-panel-to-service-worker channel local to this feature.  The
+// login gate has an equivalent helper, but the monitor is loaded separately
+// after login succeeds and therefore must not depend on that module's scope.
 function sendMessage(message) {
   return callChrome((done) => chrome.runtime.sendMessage(message, done));
 }
@@ -294,7 +277,7 @@ function renderTabs(state) {
   ];
   return tabs.map(([id, label]) => `
     <button
-      class="news-tab ${state.tab === id ? "active" : ""}"
+      class="xhs-tab ${state.tab === id ? "active" : ""}"
       type="button"
       role="tab"
       data-tab="${id}"
@@ -305,14 +288,14 @@ function renderTabs(state) {
 
 function renderKeywordRows(state) {
   return state.config.keywords.map((keyword, index) => `
-    <div class="news-keyword-row">
-      <span class="news-row-index" aria-hidden="true">${index + 1}</span>
-      <label class="news-keyword-input">
+    <div class="xhs-keyword-row">
+      <span class="xhs-row-index" aria-hidden="true">${index + 1}</span>
+      <label class="xhs-keyword-input">
         <span class="sr-only">关键词 ${index + 1}</span>
-        <input type="text" value="${escapeHtml(keyword)}" placeholder="输入新闻关键词" data-keyword-index="${index}" autocomplete="off" ${state.running ? "disabled" : ""}>
+        <input type="text" value="${escapeHtml(keyword)}" placeholder="输入小红书搜索关键词" data-keyword-index="${index}" autocomplete="off" ${state.running ? "disabled" : ""}>
       </label>
       <button
-        class="news-remove-button"
+        class="xhs-remove-button"
         type="button"
         data-action="remove-keyword"
         data-index="${index}"
@@ -326,33 +309,33 @@ function renderKeywordRows(state) {
 
 function renderFormMode(state) {
   return `
-    <div class="news-field-heading">
+    <div class="xhs-field-heading">
       <div>
-        <label>监控关键词</label>
-        <p>运行时会依次打开 Google 新闻最近一小时的搜索结果。</p>
+        <label>搜索关键词</label>
+        <p>每个关键词会作为独立的小红书搜索任务，依次打开搜索页、应用筛选并滚动采集。</p>
       </div>
       <span>${state.config.keywords.length} 个关键词</span>
     </div>
-    <div class="news-keyword-list">${renderKeywordRows(state)}</div>
-    <div class="news-inline-actions">
-      <button class="news-secondary-button emphasized" type="button" data-action="add-keyword" ${state.running ? "disabled" : ""}>添加关键词</button>
-      <button class="news-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button>
+    <div class="xhs-keyword-list">${renderKeywordRows(state)}</div>
+    <div class="xhs-inline-actions">
+      <button class="xhs-secondary-button emphasized" type="button" data-action="add-keyword" ${state.running ? "disabled" : ""}>添加关键词</button>
+      <button class="xhs-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button>
     </div>
   `;
 }
 
 function renderJsonMode(state) {
   return `
-    <div class="news-json-editor">
-      <div class="news-field-heading">
+    <div class="xhs-json-editor">
+      <div class="xhs-field-heading">
         <div>
-          <label for="newsJsonInput">运行参数 JSON</label>
-          <p>应用后会同步到表单，并用于真实的 Google 新闻搜索。</p>
+          <label for="xhsJsonInput">运行参数 JSON</label>
+          <p>应用后会同步到表单，并作为后续小红书搜索、筛选与采集的输入。</p>
         </div>
       </div>
-      <textarea id="newsJsonInput" data-json-input spellcheck="false" rows="14" ${state.running ? "disabled" : ""}>${escapeHtml(state.jsonDraft)}</textarea>
-      <div class="news-inline-actions">
-        <button class="news-secondary-button emphasized" type="button" data-action="apply-json" ${state.running ? "disabled" : ""}>校验并应用</button>
+      <textarea id="xhsJsonInput" data-json-input spellcheck="false" rows="14" ${state.running ? "disabled" : ""}>${escapeHtml(state.jsonDraft)}</textarea>
+      <div class="xhs-inline-actions">
+        <button class="xhs-secondary-button emphasized" type="button" data-action="apply-json" ${state.running ? "disabled" : ""}>校验并应用</button>
       </div>
     </div>
   `;
@@ -360,66 +343,61 @@ function renderJsonMode(state) {
 
 function renderRunOptions(state) {
   return `
-    <section class="news-options-card">
-      <button class="news-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
-        <span class="news-options-title">
+    <section class="xhs-options-card">
+      <button class="xhs-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
+        <span class="xhs-options-title">
           <strong>运行选项</strong>
-          <small>调整条数、间隔、语言和轮询</small>
+          <small>调整条数、页面筛选、间隔和轮询</small>
         </span>
-        <span class="news-option-summary" aria-label="当前运行选项摘要">
+        <span class="xhs-option-summary" aria-label="当前运行选项摘要">
           <span><small>关键词</small><strong>${state.config.keywords.length}</strong></span>
           <span><small>每词条数</small><strong>${state.config.limit}</strong></span>
           <span><small>关键词间隔</small><strong>${formatKeywordIntervalRange(state.config)}</strong></span>
         </span>
-        <span class="news-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span>
+        <span class="xhs-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span>
       </button>
       ${state.optionsOpen ? `
-        <div class="news-options-body">
-          <p class="news-options-note">运行会优先复用 Google 标签页；未找到时自动创建，然后按关键词依次搜索。</p>
-          <div class="news-options-grid">
-            <label class="news-control">
+        <div class="xhs-options-body">
+          <p class="xhs-options-note">运行时会按当前登录会话打开搜索页，并依次应用排序、笔记类型、发布时间、搜索范围和位置距离筛选。</p>
+          <div class="xhs-options-grid">
+            <label class="xhs-control">
               <span>每个关键词结果数</span>
               <input type="number" min="1" max="100" value="${state.config.limit}" data-field="limit" ${state.running ? "disabled" : ""}>
               <small>允许 1–100 条，采集后写入数据表格。</small>
             </label>
-            <label class="news-control">
+            <label class="xhs-control">
               <span>关键词间隔</span>
-              <div class="news-range-inputs">
-                <div class="news-input-with-unit">
+              <div class="xhs-range-inputs">
+                <div class="xhs-input-with-unit">
                   <input type="number" min="0" max="60000" step="50" value="${state.config.keywordIntervalMinMs}" data-field="keywordIntervalMinMs" aria-label="关键词最短间隔" ${state.running ? "disabled" : ""}>
                   <span>ms</span>
                 </div>
-                <span class="news-range-separator" aria-hidden="true">-</span>
-                <div class="news-input-with-unit">
+                <span class="xhs-range-separator" aria-hidden="true">-</span>
+                <div class="xhs-input-with-unit">
                   <input type="number" min="0" max="60000" step="50" value="${state.config.keywordIntervalMaxMs}" data-field="keywordIntervalMaxMs" aria-label="关键词最长间隔" ${state.running ? "disabled" : ""}>
                   <span>ms</span>
                 </div>
               </div>
               <small>每个关键词完成后，会在 ${formatKeywordIntervalRange(state.config)} 内重新随机等待。</small>
             </label>
-            <label class="news-control">
-              <span>时间范围</span>
-              <select data-field="timeRange" disabled><option value="last_hour" selected>最近一小时</option></select>
-              <small>通过 Google 新闻搜索参数固定最近一小时。</small>
-            </label>
-            <label class="news-control">
-              <span>界面语言</span>
-              <select data-field="language" ${state.running ? "disabled" : ""}>
-                <option value="zh-CN" ${state.config.language === "zh-CN" ? "selected" : ""}>简体中文</option>
-                <option value="en-US" ${state.config.language === "en-US" ? "selected" : ""}>English</option>
-                <option value="ja-JP" ${state.config.language === "ja-JP" ? "selected" : ""}>日本語</option>
-              </select>
-              <small>用于 Google 搜索页面的语言参数。</small>
-            </label>
+            ${XIAOHONGSHU_FILTER_GROUPS.map((group) => `
+              <label class="xhs-control">
+                <span>${escapeHtml(group.label)}</span>
+                <select data-field="${escapeHtml(group.key)}" ${state.running ? "disabled" : ""}>
+                  ${group.options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${state.config[group.key] === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+                </select>
+                <small>与小红书搜索页“${escapeHtml(group.label)}”筛选项一致。</small>
+              </label>
+            `).join("")}
           </div>
-          <div class="news-polling-row">
-            <label class="news-switch-control">
+          <div class="xhs-polling-row">
+            <label class="xhs-switch-control">
               <input type="checkbox" data-field="polling" ${state.config.polling ? "checked" : ""} ${state.running ? "disabled" : ""}>
               <span><strong>循环监控</strong><small>每轮完成后等待设定周期，再自动开始下一轮，直到手动停止。</small></span>
             </label>
-            <label class="news-control compact ${state.config.polling ? "" : "is-disabled"}">
+            <label class="xhs-control compact ${state.config.polling ? "" : "is-disabled"}">
               <span>轮询周期</span>
-              <div class="news-input-with-unit">
+              <div class="xhs-input-with-unit">
                 <input type="number" min="1" max="1440" value="${state.config.pollingMinutes}" data-field="pollingMinutes" ${state.config.polling && !state.running ? "" : "disabled"}>
                 <span>分钟</span>
               </div>
@@ -433,8 +411,8 @@ function renderRunOptions(state) {
 
 function renderParameters(state) {
   return `
-    <section class="news-parameter-card">
-      <div class="news-mode-switch" role="tablist" aria-label="参数编辑方式">
+    <section class="xhs-parameter-card">
+      <div class="xhs-mode-switch" role="tablist" aria-label="参数编辑方式">
         <button class="${state.mode === "form" ? "active" : ""}" type="button" data-action="set-mode" data-mode="form" ${state.running ? "disabled" : ""}>表单</button>
         <button class="${state.mode === "json" ? "active" : ""}" type="button" data-action="set-mode" data-mode="json" ${state.running ? "disabled" : ""}>JSON</button>
       </div>
@@ -447,26 +425,26 @@ function renderParameters(state) {
 function renderGuideModal(state) {
   if (!state.guideOpen) return "";
   return `
-    <div class="news-modal-backdrop" data-modal="guide">
-      <section class="news-batch-modal news-guide-modal" role="dialog" aria-modal="true" aria-labelledby="newsGuideTitle" aria-describedby="newsGuideDescription">
+    <div class="xhs-modal-backdrop" data-modal="guide">
+      <section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="xhsGuideTitle" aria-describedby="xhsGuideDescription">
         <header>
-          <div><span>QUICK START</span><h2 id="newsGuideTitle">使用说明</h2></div>
-          <button class="news-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭使用说明">X</button>
+          <div><span>QUICK START</span><h2 id="xhsGuideTitle">使用说明</h2></div>
+          <button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭使用说明">X</button>
         </header>
-        <div class="news-guide">
-          <p class="news-guide-intro" id="newsGuideDescription">扩展会依次搜索关键词，并把最近一小时的新闻结果写入数据表。</p>
+        <div class="xhs-guide">
+          <p class="xhs-guide-intro" id="xhsGuideDescription">运行会复用当前登录会话，按关键词打开小红书搜索页、应用筛选、滚动加载并解析页面中的笔记卡片。</p>
           <ol>
-            <li><strong>准备标签页</strong><span>无需手动打开 Google；没有可复用的 Google 标签页时，扩展会自动创建。</span></li>
+            <li><strong>准备搜索页</strong><span>复用或创建小红书搜索页，并使用进入功能时已确认的当前登录会话。</span></li>
             <li><strong>填写关键词</strong><span>支持逐条编辑、批量弹窗粘贴或 JSON 参数方式。</span></li>
-            <li><strong>点击运行</strong><span>标签页会依次打开 Google 新闻结果；开启循环监控后会按周期持续运行，直到手动停止。</span></li>
+            <li><strong>设置筛选并运行</strong><span>筛选项与页面中的排序依据、笔记类型、发布时间、搜索范围、位置距离一致；每个关键词会记录独立结果。</span></li>
           </ol>
-          <div class="news-schema-box">
+          <div class="xhs-schema-box">
             <strong>采集字段</strong>
-            <code>keyword · title · description · source · publishedAt · url · collectedAt</code>
+            <code>pageOrder · cover · keyword · noteTitle · noteContent · author · likes · publishedAt · url · collectedAt</code>
           </div>
         </div>
         <footer>
-          <button class="news-primary-button" type="button" data-action="close-guide">知道了</button>
+          <button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button>
         </footer>
       </section>
     </div>
@@ -475,7 +453,7 @@ function renderGuideModal(state) {
 
 function renderRecordStatus(record) {
   const tone = record.tone || "running";
-  return `<span class="news-table-status ${escapeHtml(tone)}">${escapeHtml(record.status)}</span>`;
+  return `<span class="xhs-table-status ${escapeHtml(tone)}">${escapeHtml(record.status)}</span>`;
 }
 
 export function filterRecords(records, filters = {}) {
@@ -495,22 +473,22 @@ function renderRecordFilters(state, filteredCount) {
     .sort((a, b) => a.localeCompare(b, "zh-CN"));
   const statusOptions = Object.entries(RECORD_STATUS_META);
   return `
-    <div class="news-record-filters" aria-label="运行记录筛选">
-      <label class="news-filter-control">
+    <div class="xhs-record-filters" aria-label="运行记录筛选">
+      <label class="xhs-filter-control">
         <span>关键词</span>
         <select data-record-filter="keyword">
           <option value="${ALL_RECORD_FILTER}">全部关键词</option>
           ${keywords.map((keyword) => `<option value="${escapeHtml(keyword)}" ${state.recordFilters.keyword === keyword ? "selected" : ""}>${escapeHtml(keyword)}</option>`).join("")}
         </select>
       </label>
-      <label class="news-filter-control">
+      <label class="xhs-filter-control">
         <span>状态</span>
         <select data-record-filter="status">
           <option value="${ALL_RECORD_FILTER}">全部状态</option>
           ${statusOptions.map(([statusKey, meta]) => `<option value="${statusKey}" ${state.recordFilters.status === statusKey ? "selected" : ""}>${meta.label}</option>`).join("")}
         </select>
       </label>
-      <span class="news-filter-result">显示 ${filteredCount} / ${state.records.length} 条</span>
+      <span class="xhs-filter-result">显示 ${filteredCount} / ${state.records.length} 条</span>
     </div>
   `;
 }
@@ -518,18 +496,18 @@ function renderRecordFilters(state, filteredCount) {
 function renderRecords(state) {
   const records = filterRecords(state.records, state.recordFilters);
   return `
-    <section class="news-content-card news-table-page">
-      <div class="news-panel-head">
+    <section class="xhs-content-card xhs-table-page">
+      <div class="xhs-panel-head">
         <div><h2>运行记录</h2><p>每次关键词采集单独记录；每一种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条。</p></div>
       </div>
       ${renderRecordFilters(state, records.length)}
-      <div class="news-table-shell records" tabindex="0" aria-label="可滚动的运行记录表格">
-        <table class="news-table">
+      <div class="xhs-table-shell records" tabindex="0" aria-label="可滚动的运行记录表格">
+        <table class="xhs-table">
           <thead><tr><th>任务编号</th><th>开始时间</th><th>关键词</th><th>轮次</th><th>状态</th><th>数据量</th><th>耗时</th></tr></thead>
           <tbody>
             ${records.length ? records.map((record) => `
               <tr>
-                <td><button class="news-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}" title="查看当前关键词任务明细"><code>${escapeHtml(getTaskId(record))}</code></button></td>
+                <td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}" title="查看当前关键词任务明细"><code>${escapeHtml(getTaskId(record))}</code></button></td>
                 <td>${escapeHtml(record.startedAt)}</td>
                 <td>${escapeHtml(record.keyword || "-")}</td>
                 <td>${escapeHtml(record.round || "-")}</td>
@@ -537,7 +515,7 @@ function renderRecords(state) {
                 <td>${record.resultCount}</td>
                 <td>${escapeHtml(record.duration || "-")}</td>
               </tr>
-            `).join("") : `<tr><td class="news-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}
+            `).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -549,8 +527,8 @@ function renderTaskDetails(state) {
   if (!state.taskDetailRecordId) return "";
   return renderTaskDetailModal({
     detail: getTaskRecordDetails(state.records, state.taskDetailRecordId),
-    prefix: "news",
-    featureName: "Google 新闻监控",
+    prefix: "xhs",
+    featureName: "小红书关键词搜索",
     escapeHtml,
     renderStatus: renderRecordStatus
   });
@@ -558,24 +536,27 @@ function renderTaskDetails(state) {
 
 function renderData(state) {
   return `
-    <section class="news-content-card news-table-page">
-      <div class="news-panel-head">
-        <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${MAX_STORED_RESULTS} 条；表格支持横向与纵向滚动。</p></div>
+    <section class="xhs-content-card xhs-table-page">
+      <div class="xhs-panel-head">
+        <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${MAX_STORED_RESULTS} 条；每次搜索结果均按页面卡片的原始顺序保存。</p></div>
       </div>
-      <div class="news-table-shell data" tabindex="0" aria-label="可滚动的 Google 新闻采集数据表格">
-        <table class="news-table news-data-table">
-          <thead><tr><th>关键词</th><th>新闻标题</th><th>描述</th><th>来源</th><th>发布时间</th><th>链接</th></tr></thead>
+      <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的 小红书笔记采集数据表格">
+        <table class="xhs-table xhs-data-table">
+          <thead><tr><th>顺序</th><th>封面</th><th>关键词</th><th>笔记标题</th><th>笔记正文</th><th>作者</th><th>发布时间</th><th>点赞</th><th>链接</th></tr></thead>
           <tbody>
             ${state.dataRows.length ? state.dataRows.map((row) => `
               <tr>
+                <td>${row.pageOrder || "-"}</td>
+                <td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td>
                 <td>${escapeHtml(row.keyword)}</td>
-                <td class="news-title-cell" title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</td>
-                <td class="news-description-cell" title="${escapeHtml(row.description || row.desc || "")}">${escapeHtml(row.description || row.desc || "-")}</td>
-                <td>${escapeHtml(row.source || "-")}</td>
+                <td class="xhs-title-cell" title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</td>
+                <td class="xhs-description-cell" title="${escapeHtml(row.description || row.desc || "")}">${escapeHtml(row.description || row.desc || "-")}</td>
+                <td>${escapeHtml(row.author || row.source || "-")}</td>
                 <td>${escapeHtml(row.time || "-")}</td>
+                <td>${escapeHtml(row.likes || "-")}</td>
                 <td><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a></td>
               </tr>
-            `).join("") : `<tr><td class="news-table-empty" colspan="6">运行后，Google 新闻结果会显示在这里</td></tr>`}
+            `).join("") : `<tr><td class="xhs-table-empty" colspan="9">运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -591,24 +572,24 @@ function renderWorkspace(state) {
 
 function renderNotice(state) {
   if (!state.notice) return "";
-  return `<div class="news-notice ${escapeHtml(state.notice.tone || "info")}" role="status">${escapeHtml(state.notice.text)}</div>`;
+  return `<div class="xhs-notice ${escapeHtml(state.notice.tone || "info")}" role="status">${escapeHtml(state.notice.text)}</div>`;
 }
 
 function renderBatchModal(state) {
   if (!state.batchOpen) return "";
   return `
-    <div class="news-modal-backdrop">
-      <section class="news-batch-modal" role="dialog" aria-modal="true" aria-labelledby="newsBatchTitle">
+    <div class="xhs-modal-backdrop">
+      <section class="xhs-batch-modal" role="dialog" aria-modal="true" aria-labelledby="xhsBatchTitle">
         <header>
-          <div><span>BATCH EDIT</span><h2 id="newsBatchTitle">批量编辑关键词</h2></div>
-          <button class="news-modal-close" type="button" data-action="close-batch" aria-label="关闭批量编辑">X</button>
+          <div><span>BATCH EDIT</span><h2 id="xhsBatchTitle">批量编辑关键词</h2></div>
+          <button class="xhs-modal-close" type="button" data-action="close-batch" aria-label="关闭批量编辑">X</button>
         </header>
         <p>每行一个关键词，也支持使用逗号分隔；应用后会替换当前列表。</p>
-        <label for="newsBatchInput">关键词列表</label>
-        <textarea id="newsBatchInput" data-batch-input rows="10" placeholder="OpenAI&#10;人工智能">${escapeHtml(state.batchDraft)}</textarea>
+        <label for="xhsBatchInput">关键词列表</label>
+        <textarea id="xhsBatchInput" data-batch-input rows="10" placeholder="穿搭&#10;护肤">${escapeHtml(state.batchDraft)}</textarea>
         <footer>
-          <button class="news-secondary-button" type="button" data-action="close-batch">取消</button>
-          <button class="news-primary-button" type="button" data-action="apply-batch">应用关键词</button>
+          <button class="xhs-secondary-button" type="button" data-action="close-batch">取消</button>
+          <button class="xhs-primary-button" type="button" data-action="apply-batch">应用关键词</button>
         </footer>
       </section>
     </div>
@@ -617,35 +598,35 @@ function renderBatchModal(state) {
 
 function renderRunButton(state, className = "") {
   if (state.running) {
-    return `<button class="news-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止"}</button>`;
+    return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止"}</button>`;
   }
-  return `<button class="news-primary-button ${className}" type="button" data-action="run">运行</button>`;
+  return `<button class="xhs-primary-button ${className}" type="button" data-action="run">运行</button>`;
 }
 
 function renderActionBar(state) {
   if (state.tab === "params") {
     return `
-      <footer class="news-action-bar">
+      <footer class="xhs-action-bar">
         ${renderRunButton(state)}
-        <button class="news-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原示例输入</button>
-        <span>${state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : isExtensionRuntime() ? "无需预先打开 Google 页面，扩展会自动准备标签页。" : "网页预览仅打开搜索页；扩展环境才会采集数据。"}</span>
+        <button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原示例输入</button>
+        <span>${state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : "运行会打开小红书搜索页，应用筛选并按页面顺序采集笔记。"}</span>
       </footer>
     `;
   }
   if (state.tab === "records") {
     return `
-      <footer class="news-action-bar news-table-action-bar">
-        <button class="news-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button>
+      <footer class="xhs-action-bar xhs-table-action-bar">
+        <button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button>
         <span>当前 ${state.records.length} 条 · 每种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条</span>
       </footer>
     `;
   }
   if (state.tab === "data") {
     return `
-      <footer class="news-action-bar news-table-action-bar">
-        <button class="news-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button>
-        <button class="news-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button>
-        <button class="news-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length ? "" : "disabled"}>清空数据</button>
+      <footer class="xhs-action-bar xhs-table-action-bar">
+        <button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button>
+        <button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button>
+        <button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length ? "" : "disabled"}>清空数据</button>
         <span>当前 ${state.dataRows.length} 条 · 最多保留 ${MAX_STORED_RESULTS} 条</span>
       </footer>
     `;
@@ -657,13 +638,13 @@ function renderPage(state, context) {
   const isTableTab = state.tab === "records" || state.tab === "data";
   const hasFixedActions = state.tab === "params" || isTableTab;
   return `
-    <section class="news-monitor ${hasFixedActions ? "has-fixed-actions" : ""}" aria-labelledby="newsMonitorTitle">
-      <header class="news-hero">
-        <div class="news-title-row">
-          <h1 id="newsMonitorTitle">${escapeHtml(context.feature.name)}</h1>
-          <span class="news-version">v0.4.4</span>
+    <section class="xhs-monitor ${hasFixedActions ? "has-fixed-actions" : ""}" aria-labelledby="xhsMonitorTitle">
+      <header class="xhs-hero">
+        <div class="xhs-title-row">
+          <h1 id="xhsMonitorTitle">${escapeHtml(context.feature.name)}</h1>
+          <span class="xhs-version">v0.2.0</span>
           <button
-            class="news-guide-button ${state.guideOpen ? "active" : ""}"
+            class="xhs-guide-button ${state.guideOpen ? "active" : ""}"
             type="button"
             data-action="open-guide"
             aria-haspopup="dialog"
@@ -674,11 +655,11 @@ function renderPage(state, context) {
             <img src="src/assets/icons/question-circle.svg" alt="" aria-hidden="true">
           </button>
         </div>
-        ${renderRunButton(state, "news-top-run")}
+        ${renderRunButton(state, "xhs-top-run")}
       </header>
-      <nav class="news-tabs" role="tablist" aria-label="Google 新闻监控页面">${renderTabs(state)}</nav>
+      <nav class="xhs-tabs" role="tablist" aria-label="小红书关键词搜索页面">${renderTabs(state)}</nav>
       ${renderNotice(state)}
-      <div class="news-workspace ${hasFixedActions ? "has-fixed-actions" : ""} ${isTableTab ? "is-table-view" : ""}">${renderWorkspace(state)}</div>
+      <div class="xhs-workspace ${hasFixedActions ? "has-fixed-actions" : ""} ${isTableTab ? "is-table-view" : ""}">${renderWorkspace(state)}</div>
       ${renderActionBar(state)}
       ${renderBatchModal(state)}
       ${renderGuideModal(state)}
@@ -688,29 +669,32 @@ function renderPage(state, context) {
 }
 
 function mergeDataRows(state, keyword, data, task) {
-  const incoming = (data?.results || []).map((result) => ({
+  const incoming = (data?.results || []).map((result, index) => ({
     id: `${keyword}|${result.url || result.title}`,
     keyword,
+    pageOrder: Number(result.order) || index + 1,
     title: result.title || "",
     description: result.description || result.desc || "",
-    source: result.source || "",
+    author: result.author || result.source || "",
+    likes: result.likes || "",
     time: result.time || "",
+    cover: result.cover || "",
     url: result.url || "",
     capturedAt: data.capturedAt || new Date().toISOString()
   }));
-  const existing = new Map(state.dataRows.map((row) => [row.id, row]));
-  let added = 0;
-  for (const row of incoming) {
-    if (!existing.has(row.id)) added += 1;
-    existing.set(row.id, tagTaskDataRow({ ...existing.get(row.id), ...row }, task));
-  }
-  state.dataRows = [...existing.values()]
-    .sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt)))
-    .slice(0, MAX_STORED_RESULTS);
+  const existingById = new Map(state.dataRows.map((row) => [row.id, row]));
+  const taggedIncoming = incoming.map((row) => tagTaskDataRow({ ...existingById.get(row.id), ...row }, task));
+  const incomingIds = new Set(taggedIncoming.map((row) => row.id));
+  const priorIds = new Set(state.dataRows.map((row) => row.id));
+  const added = taggedIncoming.filter((row) => !priorIds.has(row.id)).length;
+  state.dataRows = [
+    ...taggedIncoming,
+    ...state.dataRows.filter((row) => !incomingIds.has(row.id))
+  ].slice(0, MAX_STORED_RESULTS);
   return added;
 }
 
-export async function mountGoogleNewsMonitor(container, context) {
+export async function mountXiaohongshuKeywordMonitor(container, context) {
   const saved = await loadSavedState().catch(() => null);
   const state = {
     tab: "params",
@@ -725,13 +709,18 @@ export async function mountGoogleNewsMonitor(container, context) {
     running: false,
     stopping: false,
     recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
-    notice: !isExtensionRuntime()
-      ? { tone: "info", text: "当前是网页预览：运行会打开 Google 新闻搜索页；数据采集请在 Chrome 中加载扩展后测试。" }
-      : null,
+    notice: { tone: "info", text: "已确认小红书登录状态。设置筛选条件后点击运行，扩展会按页面顺序采集搜索结果。" },
     records: limitRecordsPerStatus(saved?.records),
     dataRows: Array.isArray(saved?.dataRows)
       ? saved.dataRows
-        .map((row) => ({ ...row, description: row.description || row.desc || "" }))
+        .map((row) => ({
+          ...row,
+          pageOrder: Number(row.pageOrder) || 0,
+          description: row.description || row.desc || "",
+          author: row.author || row.source || "",
+          likes: row.likes || "",
+          cover: row.cover || ""
+        }))
         .slice(0, MAX_STORED_RESULTS)
       : []
   };
@@ -832,6 +821,11 @@ export async function mountGoogleNewsMonitor(container, context) {
 
   const startRun = async () => {
     if (state.running) return;
+    if (!isExtensionRuntime()) {
+      state.notice = { tone: "error", text: "小红书搜索与数据采集只能在已加载扩展的 Chrome 侧边栏中运行。" };
+      render();
+      return;
+    }
     const keywords = Array.from(new Set(state.config.keywords.map((item) => item.trim()).filter(Boolean)));
     if (!keywords.length) {
       state.notice = { tone: "error", text: "请至少填写一个关键词后再运行。" };
@@ -841,9 +835,8 @@ export async function mountGoogleNewsMonitor(container, context) {
 
     state.config.keywords = keywords;
     syncJsonDraft();
-    const runStartedAtMs = Date.now();
     const control = {
-      runId: `GN-${String(runStartedAtMs).slice(-8)}`,
+      runId: "XHS-" + String(Date.now()).slice(-8),
       tabId: null,
       stopRequested: false,
       activeRecord: null
@@ -851,67 +844,8 @@ export async function mountGoogleNewsMonitor(container, context) {
     activeRun = control;
     state.running = true;
     state.stopping = false;
-    state.notice = { tone: "info", text: `正在准备 ${keywords.length} 个关键词的 Google 新闻搜索…` };
+    state.notice = { tone: "info", text: `正在准备 ${keywords.length} 个小红书搜索关键词…` };
     render();
-
-    if (!isExtensionRuntime()) {
-      let previewTab = null;
-      let openedCount = 0;
-      let previewError = "";
-
-      for (let index = 0; index < keywords.length; index += 1) {
-        if (control.stopRequested) break;
-        const keyword = keywords[index];
-        const previewRecord = createKeywordRecord(control, keyword, 1, index);
-        state.notice = { tone: "info", text: `网页预览正在打开 ${index + 1}/${keywords.length}：${keyword}` };
-        render();
-
-        try {
-          const searchUrl = buildGoogleNewsSearchUrl(keyword, state.config);
-          if (!previewTab) {
-            previewTab = globalThis.open(searchUrl, "_blank");
-            if (!previewTab) throw new Error("浏览器阻止了新标签页");
-            previewTab.opener = null;
-          } else {
-            previewTab.location.href = searchUrl;
-          }
-          openedCount += 1;
-          finishRecord(previewRecord.record, previewRecord.startedAtMs, "preview");
-        } catch (error) {
-          const errorText = error.message || String(error);
-          previewError = errorText;
-          finishRecord(previewRecord.record, previewRecord.startedAtMs, "error", 0, errorText);
-          state.notice = { tone: "error", text: `${keyword} 打开失败：${errorText}` };
-          break;
-        }
-
-        saveState(state);
-        render();
-        if (index < keywords.length - 1) {
-          await waitForKeywordInterval(state.config, control, {
-            onWait: (intervalMs) => {
-              state.notice = {
-                tone: "info",
-                text: `“${keyword}”已打开，本次随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}），然后搜索“${keywords[index + 1]}”…`
-              };
-              render();
-            }
-          });
-        }
-      }
-
-      state.running = false;
-      state.stopping = false;
-      activeRun = null;
-      state.notice = control.stopRequested
-        ? { tone: "warning", text: `网页预览已停止，共打开 ${openedCount} 个关键词。` }
-        : previewError
-          ? { tone: "error", text: `网页预览中断：已打开 ${openedCount} 个关键词；${previewError}` }
-          : { tone: "success", text: `网页预览完成：已按间隔依次打开 ${openedCount} 个关键词；扩展环境会继续采集并回填数据。` };
-      saveState(state);
-      render();
-      return;
-    }
 
     let addedTotal = 0;
     let completedRounds = 0;
@@ -920,12 +854,6 @@ export async function mountGoogleNewsMonitor(container, context) {
         const round = completedRounds + 1;
         let roundFailed = 0;
         let roundAdded = 0;
-        const tab = await getOrCreateGoogleTab(control.tabId);
-        if (!Number.isInteger(tab?.id)) {
-          throw new Error("无法创建用于 Google 新闻采集的标签页。");
-        }
-        control.tabId = tab.id;
-
         for (let index = 0; index < keywords.length; index += 1) {
           if (control.stopRequested) break;
           const keyword = keywords[index];
@@ -937,29 +865,31 @@ export async function mountGoogleNewsMonitor(container, context) {
 
           try {
             const response = await sendMessage({
-              type: MESSAGE_CAPTURE_GOOGLE_NEWS,
+              type: MESSAGE_CAPTURE_XIAOHONGSHU_KEYWORD,
               options: {
                 runId: control.runId,
-                tabId: tab.id,
+                tabId: control.tabId,
                 query: keyword,
                 limit: state.config.limit,
-                language: state.config.language
+                filters: Object.fromEntries(XIAOHONGSHU_FILTER_GROUPS.map((group) => [
+                  `${group.key}Label`,
+                  getXiaohongshuFilterLabel(group.key, state.config[group.key])
+                ]))
               }
             });
             if (control.stopRequested) {
               finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
               break;
             }
-            if (!response?.ok) {
-              throw new Error(response?.error || "采集失败");
-            }
+            if (!response?.ok) throw new Error(response?.error || "小红书采集失败");
+            control.tabId = Number.isInteger(response.tabId) ? response.tabId : control.tabId;
             const added = mergeDataRows(state, keyword, response.data, {
               runId: control.runId,
               recordId: keywordRecord.record.id
             });
             roundAdded += added;
             addedTotal += added;
-            finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", added);
+            finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", response.data?.results?.length || 0);
           } catch (error) {
             if (control.stopRequested) {
               finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
@@ -993,21 +923,18 @@ export async function mountGoogleNewsMonitor(container, context) {
         saveState(state);
         if (control.stopRequested) break;
         completedRounds = round;
-
         if (!state.config.polling) {
           state.notice = {
-            tone: roundFailed ? "error" : "success",
-            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词。`
+            tone: roundFailed ? "warning" : "success",
+            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词；${getXiaohongshuFilterSummary(state.config)}`
           };
           state.tab = addedTotal ? "data" : "records";
           break;
         }
-
         const pollingMs = state.config.pollingMinutes * 60 * 1000;
-        const nextRunAt = new Date(Date.now() + pollingMs);
         state.notice = {
           tone: roundFailed ? "warning" : "success",
-          text: `第 ${round} 轮完成，新增 ${roundAdded} 条；下一轮 ${formatTime(nextRunAt)} 开始。`
+          text: `第 ${round} 轮完成，新增 ${roundAdded} 条；下一轮 ${formatTime(new Date(Date.now() + pollingMs))} 开始。`
         };
         saveState(state);
         render();
@@ -1015,31 +942,18 @@ export async function mountGoogleNewsMonitor(container, context) {
       } while (!control.stopRequested);
 
       if (control.stopRequested) {
-        state.notice = { tone: "warning", text: `循环监控已停止，共完成 ${completedRounds} 轮，新增 ${addedTotal} 条数据。` };
+        state.notice = { tone: "warning", text: `任务已停止，共完成 ${completedRounds} 轮，新增 ${addedTotal} 条数据。` };
         state.tab = "records";
       }
     } catch (error) {
       const errorText = error.message || String(error);
       if (control.activeRecord) {
-        finishRecord(
-          control.activeRecord.record,
-          control.activeRecord.startedAtMs,
-          control.stopRequested ? "stopped" : "error",
-          0,
-          control.stopRequested ? "" : errorText
-        );
+        finishRecord(control.activeRecord.record, control.activeRecord.startedAtMs, control.stopRequested ? "stopped" : "error", 0, control.stopRequested ? "" : errorText);
         control.activeRecord = null;
-      } else if (!control.stopRequested) {
-        keywords.forEach((keyword, index) => {
-          const failedRecord = createKeywordRecord(control, keyword, completedRounds + 1, index);
-          finishRecord(failedRecord.record, failedRecord.startedAtMs, "error", 0, errorText);
-        });
       }
-      if (control.stopRequested) {
-        state.notice = { tone: "warning", text: `任务已停止，停止前新增 ${addedTotal} 条数据。` };
-      } else {
-        state.notice = { tone: "error", text: errorText };
-      }
+      state.notice = control.stopRequested
+        ? { tone: "warning", text: `任务已停止，停止前新增 ${addedTotal} 条数据。` }
+        : { tone: "error", text: errorText };
       state.tab = "records";
     } finally {
       if (activeRun === control) {
@@ -1056,19 +970,16 @@ export async function mountGoogleNewsMonitor(container, context) {
     if (!state.running || !activeRun || activeRun.stopRequested) return;
     activeRun.stopRequested = true;
     state.stopping = true;
-    state.notice = { tone: "warning", text: "正在停止任务并释放浏览器连接…" };
+    state.notice = { tone: "warning", text: "正在停止任务并释放小红书页面连接…" };
     render();
-
-    if (isExtensionRuntime()) {
-      await sendMessage({
-        type: MESSAGE_STOP_GOOGLE_NEWS,
-        options: { runId: activeRun.runId }
-      });
-    }
+    await sendMessage({
+      type: MESSAGE_STOP_XIAOHONGSHU_KEYWORD,
+      options: { runId: activeRun.runId }
+    });
   };
 
   const handleClick = (event) => {
-    if (event.target.matches(".news-modal-backdrop")) {
+    if (event.target.matches(".xhs-modal-backdrop")) {
       if (state.taskDetailRecordId) closeTaskDetails();
       else if (state.guideOpen) closeGuide();
       else closeBatch();
@@ -1185,13 +1096,13 @@ export async function mountGoogleNewsMonitor(container, context) {
       return;
     }
     if (action === "export-json") {
-      downloadGoogleNewsData(state.dataRows, "json");
+      downloadXiaohongshuKeywordData(state.dataRows, "json");
       state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` };
       render();
       return;
     }
     if (action === "export-csv") {
-      downloadGoogleNewsData(state.dataRows, "csv");
+      downloadXiaohongshuKeywordData(state.dataRows, "csv");
       state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` };
       render();
       return;
@@ -1249,7 +1160,10 @@ export async function mountGoogleNewsMonitor(container, context) {
       render();
       return;
     }
-    if (field === "language") state.config.language = event.target.value;
+    if (XIAOHONGSHU_FILTER_GROUPS.some((group) => group.key === field)) {
+      state.config[field] = event.target.value;
+      syncJsonDraft();
+    }
     if (field === "polling") {
       state.config.polling = event.target.checked;
       render();
@@ -1276,7 +1190,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       activeRun.stopRequested = true;
       if (isExtensionRuntime()) {
         sendMessage({
-          type: MESSAGE_STOP_GOOGLE_NEWS,
+          type: MESSAGE_STOP_XIAOHONGSHU_KEYWORD,
           options: { runId: activeRun.runId }
         }).catch(() => {});
       }

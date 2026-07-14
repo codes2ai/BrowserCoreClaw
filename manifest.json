@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BrowserCoreClaw",
-  "version": "0.4.4",
+  "version": "0.6.0",
   "description": "A configurable browser data collection toolbox.",
   "permissions": [
     "activeTab",
@@ -11,7 +11,14 @@
     "tabs"
   ],
   "host_permissions": [
-    "https://www.google.com/*"
+    "https://www.google.com/*",
+    "https://www.xiaohongshu.com/*",
+    "https://*.xiaohongshu.com/*",
+    "https://weibo.com/*",
+    "https://www.weibo.com/*",
+    "https://douyin.com/*",
+    "https://www.douyin.com/*",
+    "https://v.douyin.com/*"
   ],
   "background": {
     "service_worker": "src/background/service-worker.js",

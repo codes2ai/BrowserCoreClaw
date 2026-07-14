@@ -19,14 +19,6 @@
           "status": "beta",
           "entry": "src/groups/google/google-news/index.js",
           "style": "src/groups/google/google-news/styles.css"
-        },
-        {
-          "id": "web-search",
-          "name": "Google 网页搜索",
-          "description": "按关键词采集网页搜索结果、标题、摘要和来源链接。",
-          "status": "scaffold",
-          "entry": "src/groups/google/web-search/index.js",
-          "style": "src/groups/google/web-search/styles.css"
         }
       ]
     },
@@ -38,19 +30,59 @@
       "features": [
         {
           "id": "profile-posts",
-          "name": "微博主页博文",
-          "description": "采集微博主页的博文、时间、媒体资源和互动数据。",
-          "status": "scaffold",
+          "name": "微博博主博文采集",
+          "description": "按微博博主主页链接采集公开博文、媒体资源和互动数据。",
+          "status": "beta",
           "entry": "src/groups/weibo/profile-posts/index.js",
           "style": "src/groups/weibo/profile-posts/styles.css"
         },
         {
+          "id": "profile-info",
+          "name": "微博博主信息采集",
+          "description": "按微博博主主页链接采集公开资料和互动统计，无需登录前置检查。",
+          "status": "beta",
+          "entry": "src/groups/weibo/profile-info/index.js",
+          "style": "src/groups/weibo/profile-info/styles.css"
+        },
+        {
           "id": "post-detail",
-          "name": "微博正文详情",
-          "description": "根据微博正文地址采集作者、正文、媒体和互动详情。",
-          "status": "scaffold",
+          "name": "微博正文采集",
+          "description": "按微博正文链接批量采集作者、正文、媒体、话题、提及和互动详情。",
+          "status": "beta",
           "entry": "src/groups/weibo/post-detail/index.js",
           "style": "src/groups/weibo/post-detail/styles.css"
+        }
+      ]
+    },
+    {
+      "id": "douyin",
+      "name": "抖音",
+      "description": "采集抖音博主主页、作品详情和相关公开数据。",
+      "icon": "DY",
+      "features": [
+        {
+          "id": "profile-posts",
+          "name": "抖音博主博文采集",
+          "description": "按抖音博主主页链接采集公开作品、封面和互动数据。",
+          "status": "beta",
+          "entry": "src/groups/douyin/profile-posts/index.js",
+          "style": "src/groups/douyin/profile-posts/styles.css"
+        },
+        {
+          "id": "profile-info",
+          "name": "抖音博主信息采集",
+          "description": "按抖音博主主页链接采集公开资料和互动统计，不进行登录状态检测。",
+          "status": "beta",
+          "entry": "src/groups/douyin/profile-info/index.js",
+          "style": "src/groups/douyin/profile-info/styles.css"
+        },
+        {
+          "id": "post-detail",
+          "name": "抖音博文采集",
+          "description": "按抖音作品链接批量采集作者、描述、话题、媒体和互动详情。",
+          "status": "beta",
+          "entry": "src/groups/douyin/post-detail/index.js",
+          "style": "src/groups/douyin/post-detail/styles.css"
         }
       ]
     },
@@ -63,18 +95,26 @@
         {
           "id": "keyword-search",
           "name": "关键词搜索",
-          "description": "按关键词采集笔记列表，并为滚动加载和去重预留能力。",
-          "status": "scaffold",
+          "description": "按关键词搜索小红书笔记，支持页面筛选、滚动采集、记录、数据与导出。",
+          "status": "beta",
           "entry": "src/groups/xiaohongshu/keyword-search/index.js",
           "style": "src/groups/xiaohongshu/keyword-search/styles.css"
         },
         {
           "id": "profile-notes",
-          "name": "用户主页笔记",
-          "description": "根据用户主页地址采集公开笔记、作者和媒体数据。",
-          "status": "scaffold",
+          "name": "小红书博主博文采集",
+          "description": "按小红书博主主页链接采集主页博文、运行记录与可导出数据。",
+          "status": "beta",
           "entry": "src/groups/xiaohongshu/profile-notes/index.js",
           "style": "src/groups/xiaohongshu/profile-notes/styles.css"
+        },
+        {
+          "id": "profile-info",
+          "name": "小红书博主信息采集",
+          "description": "按小红书博主主页链接采集公开资料、互动统计、运行记录与可导出数据。",
+          "status": "beta",
+          "entry": "src/groups/xiaohongshu/profile-info/index.js",
+          "style": "src/groups/xiaohongshu/profile-info/styles.css"
         }
       ]
     }

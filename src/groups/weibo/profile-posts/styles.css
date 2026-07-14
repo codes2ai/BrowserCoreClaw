@@ -1,4 +1,7 @@
-.feature-placeholder[data-feature="profile-posts"] {
-  --feature-accent: #d84d3f;
-  --feature-soft: #fff0ed;
+@import url("../../xiaohongshu/profile-notes/styles.css");
+
+.xhs-monitor {
+  --xhs-red: #e94859;
+  --xhs-red-dark: #ca3144;
+  --xhs-pink: #fff1f3;
 }

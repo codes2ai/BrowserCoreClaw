@@ -1,4 +1,29 @@
-.feature-placeholder[data-feature="profile-notes"] {
-  --feature-accent: #d92c49;
-  --feature-soft: #ffedf1;
+@import url("../keyword-search/styles.css");
+
+.xhs-profile-list .xhs-keyword-input input {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.xhs-profile-init-note {
+  margin: 16px 0 0;
+  padding: 12px 13px;
+  border: 1px solid #f1d7dd;
+  border-radius: 10px;
+  background: #fff8f9;
+  color: #6f4650;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.xhs-profile-init-note strong {
+  color: var(--xhs-blue-dark);
+}
+
+.xhs-profile-url-cell {
+  min-width: 220px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
