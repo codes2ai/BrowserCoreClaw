@@ -1,82 +1,208 @@
 # BrowserCoreClaw
 
-BrowserCoreClaw 是一个运行在 Chrome 侧边栏中的浏览器数据采集工具箱。项目采用 Manifest V3，首页由 JSON 配置生成，并以“平台分组 / 独立功能目录”组织代码与文档。
+> 面向公开网页信息的 Chrome 侧边栏采集工具箱。以平台分组、独立功能目录和 JSON 配置驱动，帮助在当前浏览器 Profile 中执行可追踪、可导出的采集任务。
 
-当前提供 4 个平台分组、10 个功能：Google 新闻监控；微博博主博文、博主信息、正文采集；抖音博主博文、博主信息、博文采集；小红书关键词搜索、博主博文、博主信息采集。
+BrowserCoreClaw 是一个 [Chrome Manifest V3](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3) 扩展。它不依赖业务后端：功能界面运行在 Chrome Side Panel 中，后台通过 Chrome Debugger API 打开或复用目标页面、等待页面稳定后读取公开可见内容；任务记录与采集结果保存在 `chrome.storage.local`。
 
-## 架构
+> 当前处于 Beta 阶段。各平台页面结构、登录状态与风控策略可能变化；请仅在遵守目标平台规则、法律法规及数据使用边界的前提下使用。
 
-- `src/config/groups.json` 是功能列表唯一配置源：定义分组、功能名称、入口和样式。
-- `src/groups/<platform>/<feature>/` 是功能的独立实现目录：入口、监控界面、后台采集、导出和样式彼此隔离。
-- `src/background/service-worker.js` 负责将侧边栏消息路由至各功能后台采集器。
-- `src/background/debugger-client.js` 封装 Chrome Debugger API，用于导航、等待页面稳定并读取公开页面内容。
-- `src/shared/` 放置跨平台可复用的任务明细能力；运行记录、数据表和导出状态保存在 `chrome.storage.local`。
+## 目录
 
-## 目录结构
+- [核心能力](#核心能力)
+- [支持的平台与功能](#支持的平台与功能)
+- [工作原理](#工作原理)
+- [快速开始](#快速开始)
+- [数据、权限与安全边界](#数据权限与安全边界)
+- [项目结构](#项目结构)
+- [开发与扩展](#开发与扩展)
+- [限制与排查](#限制与排查)
+- [功能文档](#功能文档)
 
-```text
-BrowserCoreClaw/
-├── doc/                                      # 功能说明文档
-│   ├── google/
-│   │   └── google-news.md                     # Google 新闻监控
-│   ├── weibo/
-│   │   ├── profile-posts.md                   # 微博博主博文采集
-│   │   ├── profile-info.md                    # 微博博主信息采集
-│   │   └── post-detail.md                     # 微博正文采集
-│   ├── douyin/
-│   │   ├── profile-posts.md                   # 抖音博主博文采集
-│   │   ├── profile-info.md                    # 抖音博主信息采集
-│   │   └── post-detail.md                     # 抖音博文采集
-│   └── xiaohongshu/
-│       ├── keyword-search.md                  # 小红书关键词搜索
-│       ├── profile-notes.md                   # 小红书博主博文采集
-│       └── profile-info.md                    # 小红书博主信息采集
-├── manifest.json                              # Chrome 扩展清单与站点权限
-├── sidepanel.html                             # 侧边栏页面
-├── src/
-│   ├── app/                                   # 首页配置加载、路由与通用界面
-│   ├── background/                            # Debugger 封装与消息路由
-│   ├── config/groups.json                     # 分组与功能配置
-│   ├── groups/<platform>/<feature>/           # 平台 / 功能独立代码
-│   └── shared/                                # 跨功能任务明细等共享能力
-└── scripts/                                   # 配置校验与打包脚本
+## 核心能力
+
+- **平台化功能目录**：按 Google、微博、抖音、小红书等数据来源平台组织；首页从 JSON 配置动态生成。
+- **独立任务执行**：关键词、主页链接或内容链接均可逐条或批量输入；长任务在返回功能列表后仍由后台继续执行。
+- **页面稳定性控制**：在读取前等待目标区域、筛选状态或滚动加载结果稳定，降低“页面尚未刷新完成即采集”的概率。
+- **可控采集节奏**：主页类和关键词类功能支持随机间隔；支持循环监控的功能可按轮次持续运行，直至手动停止。
+- **记录与数据分离**：运行记录支持关键词/链接与状态筛选；点击任务编号可查看单次任务的状态、耗时、结果数量和错误信息。
+- **本地留存与导出**：每项功能的数据最多保留 3,000 条；运行记录按状态最多保留 200 条；支持 JSON 与 UTF-8 BOM CSV 导出。
+
+## 支持的平台与功能
+
+| 平台 | 功能 | 输入 | 登录前置检查 | 主要产出 |
+| --- | --- | --- | --- | --- |
+| Google | Google 新闻监控 | 关键词 | 不需要 | 最近一小时新闻标题、描述、来源、发布时间、链接 |
+| 微博 | 博主博文采集 | 博主主页链接 | 不需要 | 公开博文、互动数据、媒体链接 |
+| 微博 | 博主信息采集 | 博主主页链接 | 不需要 | 公开资料、主页互动统计、资料卡详情 |
+| 微博 | 正文采集 | 博文链接 | 不需要 | 作者、正文、话题、提及、互动与媒体 |
+| 抖音 | 博主博文采集 | 博主主页链接 | 不需要 | 公开作品、封面、点赞与页面顺序 |
+| 抖音 | 博主信息采集 | 博主主页链接 | 不需要 | 头像、昵称、账号标识、互动统计与标签 |
+| 抖音 | 博文采集 | 作品链接或短链 | 不需要 | 作品详情、作者、话题、互动与媒体 |
+| 小红书 | 关键词搜索 | 关键词与页面筛选项 | **需要** | 笔记卡片、作者、发布时间、点赞与链接 |
+| 小红书 | 博主博文采集 | 博主主页链接 | **需要** | 主页笔记卡片与页面顺序 |
+| 小红书 | 博主信息采集 | 博主主页链接 | **需要** | 公开资料、互动统计、标签与 IP 属地 |
+
+“不需要”表示扩展不会在运行前拦截登录状态；这并不代表平台不会要求登录、验证码或其他安全验证。遇到验证时，请在对应站点页面中自行完成处理后再重试。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+  A[Chrome Side Panel<br/>功能界面] --> B[功能 Monitor<br/>参数、记录与数据视图]
+  B -->|chrome.runtime.sendMessage| C[Service Worker<br/>消息路由]
+  C --> D[功能 Background<br/>任务编排与状态控制]
+  D --> E[Chrome Debugger API<br/>导航、等待、页面脚本]
+  E --> F[目标平台公开页面]
+  D --> G[chrome.storage.local<br/>数据与运行记录]
+  G --> B
+  B --> H[JSON / CSV 导出]
 ```
 
-## 功能文档
+每项功能遵循相同的职责边界：
 
-| 平台 | 功能 | 文档 |
-| --- | --- | --- |
-| Google | Google 新闻监控 | [查看说明](doc/google/google-news.md) |
-| 微博 | 微博博主博文采集 | [查看说明](doc/weibo/profile-posts.md) |
-| 微博 | 微博博主信息采集 | [查看说明](doc/weibo/profile-info.md) |
-| 微博 | 微博正文采集 | [查看说明](doc/weibo/post-detail.md) |
-| 抖音 | 抖音博主博文采集 | [查看说明](doc/douyin/profile-posts.md) |
-| 抖音 | 抖音博主信息采集 | [查看说明](doc/douyin/profile-info.md) |
-| 抖音 | 抖音博文采集 | [查看说明](doc/douyin/post-detail.md) |
-| 小红书 | 关键词搜索 | [查看说明](doc/xiaohongshu/keyword-search.md) |
-| 小红书 | 小红书博主博文采集 | [查看说明](doc/xiaohongshu/profile-notes.md) |
-| 小红书 | 小红书博主信息采集 | [查看说明](doc/xiaohongshu/profile-info.md) |
+1. **界面层（`index.js` / `monitor.js`）**：维护输入、运行状态、记录和数据表。
+2. **后台层（`background.js`）**：创建或复用任务标签页、调用 Debugger、处理停止信号与错误。
+3. **页面解析层（`page-extract.js`，按需提供）**：从页面公开 DOM 中读取数据，并判断筛选或列表是否稳定。
+4. **导出层（`export-data.js`）**：将本地结果规范化为 JSON 与 CSV。
 
-## 增加功能
+## 快速开始
 
-1. 在 `src/groups/<platform-id>/<feature-id>/` 建立独立功能目录，并导出 `mount(container, context)`。
-2. 按需提供 `background.js`、`constants.js`、`monitor.js`、`export-data.js` 和 `styles.css`。
-3. 在 `src/config/groups.json` 中注册功能的 `entry` 与 `style`。
-4. 在 `src/background/service-worker.js` 注册采集与停止消息。
-5. 在 `doc/<platform-id>/<feature-id>.md` 新建功能说明，并同步更新本 README 的目录与文档表。
-6. 执行 `npm run check` 验证配置和入口，执行 `npm run package` 生成扩展包。
+### 环境要求
 
-一级分组只代表数据来源平台，不按“搜索”“媒体”等能力类型分组。新增站点权限时，需要在 `chrome://extensions/` 重新加载扩展并确认权限。
+- 最新版 Google Chrome（需支持 Manifest V3、Side Panel 与 Debugger API）。
+- Node.js 18+（仅用于校验与打包）。
 
-## 本地加载与打包
+项目没有第三方 npm 依赖；执行以下脚本前无需安装 `node_modules`。
 
-1. 打开 `chrome://extensions/` 并开启“开发者模式”。
-2. 选择“加载已解压的扩展程序”，指定本项目根目录。
-3. 点击扩展图标，打开 Chrome 右侧面板。
+### 以未打包扩展方式加载
+
+1. 克隆或下载本仓库。
+2. 在 Chrome 打开 `chrome://extensions/`，开启右上角的“开发者模式”。
+3. 点击“加载已解压的扩展程序”，选择本项目根目录。
+4. 点击扩展图标，Chrome 会打开 BrowserCoreClaw 侧边栏。
+5. 修改源代码、配置或权限后，在扩展管理页点击“重新加载”。
+
+### 校验与打包
 
 ```bash
+# 校验 Manifest、功能配置、入口文件与关键采集逻辑
 npm run check
+
+# 先执行校验，再输出可分发扩展包
 npm run package
 ```
 
-打包结果输出至 `dist/BrowserCoreClaw-<version>.zip`。
+打包产物为 `dist/BrowserCoreClaw-<version>.zip`。打包脚本会重新生成 `dist/` 目录，请勿在其中保存手工文件。
+
+> 使用 `python3 -m http.server` 等静态服务器打开 `sidepanel.html` 仅能预览界面；实际采集、登录检测、标签页控制与本地存储必须在已加载的 Chrome 扩展中运行。
+
+## 数据、权限与安全边界
+
+### 数据处理
+
+- 采集结果与任务记录使用 `chrome.storage.local` 存储在当前浏览器 Profile 内。
+- 当前项目未配置业务服务端或远程数据接口；导出由浏览器本地发起。
+- 小红书登录由用户在现有 Chrome 会话中自行完成。扩展不代填、不保存平台账号密码。
+- 内置功能只读取页面公开可见内容，不执行点赞、评论、转发、关注等互动操作。
+
+### Chrome 权限说明
+
+| 权限 | 用途 |
+| --- | --- |
+| `sidePanel` | 展示功能列表与各采集功能界面。 |
+| `storage` | 保存输入配置、运行记录与采集结果。 |
+| `tabs` / `activeTab` | 创建、查找或复用目标站点标签页。 |
+| `debugger` | 驱动页面导航、等待页面稳定并读取公开页面内容。 |
+| 站点 Host Permissions | 允许扩展在 Google、小红书、微博和抖音的已声明域名中执行采集流程。 |
+
+Debugger 只能同时被有限的调试会话占用。若浏览器 DevTools、其他自动化工具或扩展正在调试同一标签页，任务可能出现连接中断提示；关闭冲突工具后重新运行即可。
+
+## 项目结构
+
+```text
+BrowserCoreClaw/
+├── manifest.json                         # Manifest V3、权限、Side Panel 与后台入口
+├── sidepanel.html                        # 扩展侧边栏页面
+├── src/
+│   ├── app/                              # 首页、配置加载、功能路由与通用样式
+│   ├── background/                       # Service Worker 消息路由、Debugger 客户端
+│   ├── config/groups.json                # 平台分组与功能入口的唯一配置源
+│   ├── groups/
+│   │   └── <platform>/<feature>/          # 每项功能的独立实现目录
+│   │       ├── index.js                  # 功能挂载入口
+│   │       ├── monitor.js                # 页面状态、任务记录与数据界面
+│   │       ├── background.js             # 后台采集任务（按需）
+│   │       ├── page-extract.js           # 页面稳定性与数据解析（按需）
+│   │       ├── export-data.js            # JSON / CSV 数据导出（按需）
+│   │       ├── constants.js              # 消息类型与功能常量（按需）
+│   │       └── styles.css                # 功能私有样式
+│   └── shared/                           # 跨功能复用的任务明细等能力
+├── doc/<platform>/<feature>.md           # 每项功能的使用与字段说明
+├── scripts/
+│   ├── validate.mjs                      # 配置、语法与关键逻辑校验
+│   └── package-extension.sh              # 扩展打包脚本
+└── dist/                                 # 本地构建产物（自动生成）
+```
+
+## 开发与扩展
+
+### 功能配置
+
+`src/config/groups.json` 是功能目录的唯一配置源。每个功能需要声明平台、名称、简介、模块入口与样式入口；首页会据此生成分组、搜索结果与功能路由。
+
+```json
+{
+  "id": "feature-id",
+  "name": "功能名称",
+  "description": "显示在首页问号提示中的功能简介",
+  "entry": "src/groups/<platform>/<feature>/index.js",
+  "style": "src/groups/<platform>/<feature>/styles.css"
+}
+```
+
+平台分组按**数据来源平台**划分，而不是按搜索、监控或导出等能力划分。
+
+### 新增一项采集功能
+
+1. 在 `src/groups/<platform-id>/<feature-id>/` 新建独立功能目录，并在 `index.js` 中导出 `mount(container, context)`。
+2. 按需要实现 `monitor.js`、`background.js`、`page-extract.js`、`export-data.js`、`constants.js` 与 `styles.css`。
+3. 在 `src/config/groups.json` 注册 `entry` 和 `style`；入口与样式必须位于该功能的独立目录内。
+4. 在 `src/background/service-worker.js` 注册采集与停止消息，使功能界面能够与后台任务通信。
+5. 在 `doc/<platform-id>/<feature-id>.md` 补充功能目的、输入、流程、字段、数据留存和注意事项，并在本 README 的功能表中登记。
+6. 执行 `npm run check`；通过后重新加载扩展并进行真实页面回归测试。
+
+### 代码约定
+
+- 使用原生 ES Modules，不引入构建框架或运行时依赖。
+- 每项功能的数据结构、存储键、消息类型和页面选择器应保持在功能目录内，避免跨平台耦合。
+- 页面 DOM 变化时，优先更新解析与稳定性判断，不要用固定延时替代状态确认。
+- 新增 Host Permission 时，应审查权限范围，并在 `chrome://extensions/` 重新加载扩展后确认授权。
+
+## 限制与排查
+
+| 现象 | 优先检查 |
+| --- | --- |
+| 运行后未获取数据 | 目标页面是否已完成登录、验证码或安全验证；页面公开内容是否可见。 |
+| 任务提示 Debugger 未连接或被占用 | 关闭正在调试同一标签页的 DevTools、自动化工具或其他扩展，然后重新运行。 |
+| 筛选后数据仍是旧结果 | 等待页面筛选状态与结果列表稳定；如站点改版，更新对应的 `page-extract.js`。 |
+| 侧边栏里点击无反应 | 在 `chrome://extensions/` 重新加载扩展，并检查 Service Worker 控制台错误。 |
+| 静态预览可打开但采集失败 | 确认是在已加载的扩展中运行，而非普通 HTTP 页面。 |
+
+## 功能文档
+
+| 平台 | 功能 | 说明 |
+| --- | --- | --- |
+| Google | Google 新闻监控 | [查看文档](doc/google/google-news.md) |
+| 微博 | 博主博文采集 | [查看文档](doc/weibo/profile-posts.md) |
+| 微博 | 博主信息采集 | [查看文档](doc/weibo/profile-info.md) |
+| 微博 | 正文采集 | [查看文档](doc/weibo/post-detail.md) |
+| 抖音 | 博主博文采集 | [查看文档](doc/douyin/profile-posts.md) |
+| 抖音 | 博主信息采集 | [查看文档](doc/douyin/profile-info.md) |
+| 抖音 | 博文采集 | [查看文档](doc/douyin/post-detail.md) |
+| 小红书 | 关键词搜索 | [查看文档](doc/xiaohongshu/keyword-search.md) |
+| 小红书 | 博主博文采集 | [查看文档](doc/xiaohongshu/profile-notes.md) |
+| 小红书 | 博主信息采集 | [查看文档](doc/xiaohongshu/profile-info.md) |
+
+---
+
+如需新增平台、功能或字段，请先以 `groups.json`、对应功能目录和 `doc/` 中的同类实现为模板，保持“平台分组 / 独立功能目录 / 独立功能文档”的结构一致。

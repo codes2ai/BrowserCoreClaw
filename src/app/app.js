@@ -26,15 +26,6 @@ function extensionUrl(path) {
   return new URL(`../../${path}`, import.meta.url).href;
 }
 
-function statusLabel(status) {
-  const labels = {
-    ready: "可用",
-    beta: "测试中",
-    scaffold: "待实现"
-  };
-  return labels[status] || "待实现";
-}
-
 function validateConfig(config) {
   if (!config?.app || !Array.isArray(config.groups)) {
     throw new Error("分组配置缺少 app 或 groups。 ");
@@ -148,22 +139,30 @@ function filteredGroups() {
 }
 
 function featureCard(group, feature) {
+  const tooltipId = `feature-tip-${group.id}-${feature.id}`.replaceAll(/[^a-zA-Z0-9_-]/g, "-");
+
   return `
-    <button
-      class="feature-card"
-      type="button"
-      data-group-id="${escapeHtml(group.id)}"
-      data-feature-id="${escapeHtml(feature.id)}"
-      aria-label="打开 ${escapeHtml(feature.name)}"
-    >
-      <span class="feature-card-head">
+    <div class="feature-tile">
+      <button
+        class="feature-card"
+        type="button"
+        data-group-id="${escapeHtml(group.id)}"
+        data-feature-id="${escapeHtml(feature.id)}"
+        aria-label="打开 ${escapeHtml(feature.name)}"
+      >
         <span class="feature-icon" aria-hidden="true">${escapeHtml(group.icon || group.name.slice(0, 1))}</span>
-        <span class="status-badge status-${escapeHtml(feature.status)}">${escapeHtml(statusLabel(feature.status))}</span>
-      </span>
-      <span class="feature-name">${escapeHtml(feature.name)}</span>
-      <span class="feature-description">${escapeHtml(feature.description)}</span>
-      <span class="feature-open">进入功能 <span aria-hidden="true">→</span></span>
-    </button>
+        <span class="feature-name">${escapeHtml(feature.name)}</span>
+      </button>
+      <button
+        class="feature-help"
+        type="button"
+        aria-label="查看 ${escapeHtml(feature.name)} 简介"
+        aria-describedby="${escapeHtml(tooltipId)}"
+      >
+        <img src="src/assets/icons/question-circle.svg" alt="" aria-hidden="true">
+      </button>
+      <span id="${escapeHtml(tooltipId)}" class="feature-tooltip" role="tooltip">${escapeHtml(feature.description)}</span>
+    </div>
   `;
 }
 

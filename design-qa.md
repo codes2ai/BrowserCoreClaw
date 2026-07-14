@@ -82,3 +82,34 @@ No actionable P0, P1, or P2 visual or interaction findings remain for the local 
 - P3: reload the unpacked extension and run a two-round live polling task to confirm the installed Chrome debugger lifecycle, per-keyword record transitions, and download prompts in the user's profile.
 
 final result: passed
+
+---
+
+## 功能列表图标网格（2026-07-14）
+
+### 测试范围
+
+- **参考图：** `/var/folders/g2/r66gs5k91ks54x8_tm4935mh0000gn/T/codex-clipboard-4ca25d4c-fad2-4ea8-9756-1d700118e113.png`
+- **实现页面：** `http://127.0.0.1:4173/sidepanel.html`
+- **验证视口：** 428 × 800（浏览器侧边栏宽度）
+- **参考解读：** 采用参考图的“紧凑图标 + 名称”网格排版；平台缩写图标沿用产品既有视觉，而非引入参考图中的第三方站点 Logo。
+
+### 已验证交互
+
+- 每个分组内功能按固定宽度、左对齐的图标网格排列；侧边栏宽度下，三个功能可在一行展示。
+- 功能图标点击后可进入对应功能页面，且可通过“功能列表”返回主界面。
+- 每个图标右上角的问号可悬停、点击或键盘聚焦，显示该功能简介。
+- 窄屏下提示气泡最大宽度受限；实测 428px 视口中，提示框边界为 `x=3.25`、`right=147.25`，未溢出左侧页面边界。
+- 控制台错误：无。
+
+### 对比与修正记录
+
+1. 初版使用自动填充的弹性列，单个或少量功能会被居中拉伸，不符合参考图的紧凑排列。
+2. 改为固定图标轨道、左对齐的网格，并收窄组内间距，使各平台分组的视觉密度一致。
+3. 初版问号提示在侧边栏左侧可能越界；已增加响应式最大宽度，复验通过。
+
+### 结论
+
+没有遗留的 P0/P1/P2 视觉或交互问题。
+
+**Final result:** passed
