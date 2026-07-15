@@ -12,9 +12,19 @@ import {
   normalizeTaskConcurrency,
   runConcurrentTasks
 } from "../../shared/concurrent-task-pool.js";
+import { buildFeatureKey, setFeatureRunning } from "../../shared/feature-run-status.js";
+import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../shared/task-timeout.js";
+import {
+  applyItemLimit,
+  formatLimitValue,
+  loadGlobalStorageLimits
+} from "../../shared/storage-limits.js";
+import {
+  DEFAULT_EXECUTION_INTERVAL_MAX_MS,
+  DEFAULT_EXECUTION_INTERVAL_MIN_MS,
+  migrateLegacyExecutionInterval
+} from "../../shared/execution-interval.js";
 
-const MAX_RECORDS_PER_STATUS = 200;
-const MAX_STORED_RESULTS = 3000;
 const ALL_RECORD_FILTER = "__all__";
 const STATUS = Object.freeze({
   running: { label: "运行中", tone: "running" },
@@ -22,7 +32,7 @@ const STATUS = Object.freeze({
   error: { label: "失败", tone: "error" },
   stopped: { label: "已停止", tone: "stopped" }
 });
-const DEFAULT_OPTIONS = Object.freeze({ limit: 20, intervalMinMs: 100, intervalMaxMs: 6000, concurrency: DEFAULT_TASK_CONCURRENCY, polling: false, pollingMinutes: 10 });
+const DEFAULT_OPTIONS = Object.freeze({ limit: 20, intervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS, intervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS, concurrency: DEFAULT_TASK_CONCURRENCY, polling: false, pollingMinutes: 10 });
 const activeRuns = new Map();
 
 function escapeHtml(value) {
@@ -78,6 +88,8 @@ export function createWeiboProfileMonitor(settings) {
   const rowLabel = settings.rowLabel || (settings.kind === "posts" ? "博文" : "资料");
   const hasLimit = Boolean(settings.hasLimit ?? settings.kind === "posts");
   const supportsPolling = settings.supportsPolling !== false;
+  const featureId = settings.featureId || (settings.kind === "posts" ? "profile-posts" : settings.kind === "info" ? "profile-info" : settings.kind);
+  const featureKey = buildFeatureKey(settings.platformId || "weibo", featureId);
   const subjectLabel = settings.subjectLabel || "博主主页";
   const inputPlaceholder = settings.inputPlaceholder || "https://weibo.com/u/数字ID";
   const validTargetUrl = settings.validateTargetUrl || isWeiboProfileUrl;
@@ -103,8 +115,8 @@ export function createWeiboProfileMonitor(settings) {
       [settings.storageKey]: {
         profileUrls: uniqueUrls(state.profileUrls),
         config,
-        records: limitProfileRecordsPerStatus(state.records),
-        dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS),
+        records: limitProfileRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
+        dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
         notice: state.notice
       }
     }).catch(() => {});
@@ -138,37 +150,42 @@ export function createWeiboProfileMonitor(settings) {
   const renderRecords = (state) => {
     const records = filterProfileRecords(state.records, state.recordFilters);
     const profiles = Array.from(new Set(state.records.map((record) => record.keyword).filter(Boolean)));
-    return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个${escapeHtml(subjectLabel)}独立记录；每一种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条。</p></div></div><div class="xhs-record-filters"><label class="xhs-filter-control"><span>${escapeHtml(subjectLabel)}</span><select data-record-filter="profile"><option value="${ALL_RECORD_FILTER}">全部${escapeHtml(subjectLabel)}</option>${profiles.map((url) => `<option value="${escapeHtml(url)}" ${state.recordFilters.profile === url ? "selected" : ""}>${escapeHtml(url)}</option>`).join("")}</select></label><label class="xhs-filter-control"><span>状态</span><select data-record-filter="status"><option value="${ALL_RECORD_FILTER}">全部状态</option>${Object.entries(STATUS).map(([key, meta]) => `<option value="${key}" ${state.recordFilters.status === key ? "selected" : ""}>${meta.label}</option>`).join("")}</select></label><span class="xhs-filter-result">显示 ${records.length} / ${state.records.length} 条</span></div><div class="xhs-table-shell records" tabindex="0"><table class="xhs-table"><thead><tr><th>任务编号</th><th>开始时间</th><th>${escapeHtml(subjectLabel)}</th><th>轮次</th><th>状态</th><th>${rowLabel}数</th><th>耗时</th></tr></thead><tbody>${records.length ? records.map((record) => `<tr><td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}"><code>${escapeHtml(getTaskId(record))}</code></button></td><td>${escapeHtml(record.startedAt)}</td><td class="xhs-profile-url-cell" title="${escapeHtml(record.keyword)}">${escapeHtml(record.keyword)}</td><td>${escapeHtml(record.round)}</td><td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${escapeHtml(record.duration)}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody></table></div></section>`;
+    return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个${escapeHtml(subjectLabel)}独立记录；每一种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}。</p></div></div><div class="xhs-record-filters"><label class="xhs-filter-control"><span>${escapeHtml(subjectLabel)}</span><select data-record-filter="profile"><option value="${ALL_RECORD_FILTER}">全部${escapeHtml(subjectLabel)}</option>${profiles.map((url) => `<option value="${escapeHtml(url)}" ${state.recordFilters.profile === url ? "selected" : ""}>${escapeHtml(url)}</option>`).join("")}</select></label><label class="xhs-filter-control"><span>状态</span><select data-record-filter="status"><option value="${ALL_RECORD_FILTER}">全部状态</option>${Object.entries(STATUS).map(([key, meta]) => `<option value="${key}" ${state.recordFilters.status === key ? "selected" : ""}>${meta.label}</option>`).join("")}</select></label><span class="xhs-filter-result">显示 ${records.length} / ${state.records.length} 条</span></div><div class="xhs-table-shell records" tabindex="0"><table class="xhs-table"><thead><tr><th>任务编号</th><th>开始时间</th><th>${escapeHtml(subjectLabel)}</th><th>轮次</th><th>状态</th><th>${rowLabel}数</th><th>耗时</th></tr></thead><tbody>${records.length ? records.map((record) => `<tr><td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}"><code>${escapeHtml(getTaskId(record))}</code></button></td><td>${escapeHtml(record.startedAt)}</td><td class="xhs-profile-url-cell" title="${escapeHtml(record.keyword)}">${escapeHtml(record.keyword)}</td><td>${escapeHtml(record.round)}</td><td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${escapeHtml(record.duration)}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody></table></div></section>`;
   };
-  const renderData = (state) => `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${MAX_STORED_RESULTS} 条；${settings.dataSummary}</p></div></div><div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table">${settings.renderDataTable(state.dataRows, escapeHtml)}</table></div></section>`;
+  const renderData = (state) => `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；${settings.dataSummary}</p></div></div><div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table">${settings.renderDataTable(state.dataRows, escapeHtml)}</table></div></section>`;
   const renderBatch = (state) => state.batchOpen ? `<div class="xhs-modal-backdrop" data-modal="batch"><section class="xhs-batch-modal" role="dialog" aria-modal="true" aria-labelledby="weiboBatchTitle"><header><div><span>BATCH EDIT</span><h2 id="weiboBatchTitle">批量编辑${escapeHtml(subjectLabel)}</h2></div><button class="xhs-modal-close" type="button" data-action="close-batch" aria-label="关闭">X</button></header><p>${settings.batchDescription || `每行一个${subjectLabel}链接（<code>${escapeHtml(inputPlaceholder)}</code>）；应用后会替换当前列表。`}</p><textarea data-batch-input rows="10">${escapeHtml(state.batchDraft)}</textarea><footer><button class="xhs-secondary-button" type="button" data-action="close-batch">取消</button><button class="xhs-primary-button" type="button" data-action="apply-batch">应用链接</button></footer></section></div>` : "";
   const renderGuide = (state) => state.guideOpen ? `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="profileGuideTitle"><header><div><span>QUICK START</span><h2 id="profileGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">${settings.guideIntro}</p><ol><li><strong>填写${escapeHtml(subjectLabel)}</strong><span>${settings.guideInputText || `输入一个或多个${platformName}${subjectLabel}链接。`}</span></li><li><strong>等待稳定</strong><span>${settings.guideWaitText || "程序会打开链接，连续确认页面数据稳定后才开始读取。"}</span></li><li><strong>查看与导出</strong><span>每个${escapeHtml(subjectLabel)}会生成一条运行记录；数据支持 JSON 和 CSV 导出。</span></li></ol><div class="xhs-schema-box"><strong>采集字段</strong><code>${settings.fieldList}</code></div></div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>` : "";
   const renderTask = (state) => state.taskDetailRecordId ? renderTaskDetailModal({ detail: getTaskRecordDetails(state.records, state.taskDetailRecordId), prefix: "xhs", featureName: settings.featureName, detailTitle: `${settings.featureName}任务明细`, subjectLabel, escapeHtml, renderStatus }) : "";
   const renderAction = (state) => {
     if (state.tab === "params") return `<footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原输入</button><span>${state.running ? "任务运行中，参数已锁定；可以停止任务。" : settings.idleActionText}</span></footer>`;
-    if (state.tab === "records") return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条</span></footer>`;
-    return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${MAX_STORED_RESULTS} 条</span></footer>`;
+    if (state.tab === "records") return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>`;
+    return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>`;
   };
   const renderPage = (state, context) => `<section class="xhs-monitor has-fixed-actions" aria-labelledby="profileMonitorTitle"><header class="xhs-hero"><div class="xhs-title-row"><h1 id="profileMonitorTitle">${escapeHtml(context.feature.name)}</h1><span class="xhs-version">v0.1.0</span><button class="xhs-guide-button" type="button" data-action="open-guide" title="查看使用说明"><span>使用说明</span><img src="src/assets/icons/question-circle.svg" alt=""></button></div>${renderRunButton(state, "xhs-top-run")}</header><nav class="xhs-tabs" role="tablist">${renderTabs(state)}</nav><div class="xhs-notice ${escapeHtml(state.notice.tone)}" role="status">${escapeHtml(state.notice.text)}</div><div class="xhs-workspace has-fixed-actions ${state.tab === "params" ? "" : "is-table-view"}">${state.tab === "params" ? renderParameters(state) : state.tab === "records" ? renderRecords(state) : renderData(state)}</div>${renderAction(state)}${renderBatch(state)}${renderGuide(state)}${renderTask(state)}</section>`;
 
   return async function mountWeiboProfileMonitor(container, context) {
+    const storageLimits = await loadGlobalStorageLimits().catch(() => ({ dataStorageLimit: 3000, taskRecordsPerStatusLimit: 200 }));
     const saved = await loadSavedState().catch(() => null);
-    const savedConfig = saved?.config || {};
+    const savedConfig = migrateLegacyExecutionInterval(saved?.config || {}, {
+      legacyMinMs: 100,
+      legacyMaxMs: 6000
+    });
     const savedRange = normalizeProfileIntervalRange(savedConfig);
     const state = {
-      tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...defaultUrls], records: limitProfileRecordsPerStatus(saved?.records), dataRows: Array.isArray(saved?.dataRows) ? saved.dataRows.slice(0, MAX_STORED_RESULTS) : [], batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100), concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedRange.intervalMinMs, intervalMaxMs: savedRange.intervalMaxMs, polling: supportsPolling && Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeRuns.get(runScope) && !activeRuns.get(runScope).stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: settings.initialNotice }
+      tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...defaultUrls], dataStorageLimit: storageLimits.dataStorageLimit, taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit, records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit), dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit), batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100), concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedRange.intervalMinMs, intervalMaxMs: savedRange.intervalMaxMs, polling: supportsPolling && Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeRuns.get(runScope) && !activeRuns.get(runScope).stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: settings.initialNotice }
     };
+    saveState(state);
     let disposed = false;
     let activeRun = activeRuns.get(runScope) || null;
     const render = () => { if (!disposed) container.innerHTML = renderPage(state, context); };
     const finishRecord = (id, startedAtMs, statusKey, resultCount = 0, error = "") => {
       const meta = STATUS[statusKey] || STATUS.error;
-      state.records = updateProfileRecord(state.records, id, { status: meta.label, statusKey, tone: meta.tone, resultCount: Number(resultCount) || 0, error, duration: formatDuration(Date.now() - startedAtMs) });
+      state.records = updateProfileRecord(state.records, id, { status: meta.label, statusKey, tone: meta.tone, resultCount: Number(resultCount) || 0, error, duration: formatDuration(Date.now() - startedAtMs) }, state.taskRecordsPerStatusLimit);
     };
     const createRecord = (control, profileUrl, round, index) => {
       const startedAtMs = Date.now();
       const record = { id: `${control.runId}-R${round}-P${index + 1}`, runId: control.runId, startedAt: formatTime(new Date(startedAtMs)), keyword: profileUrl, round, status: STATUS.running.label, statusKey: "running", tone: "running", resultCount: 0, duration: "-", error: "" };
-      state.records = limitProfileRecordsPerStatus([record, ...state.records]);
+      state.records = limitProfileRecordsPerStatus([record, ...state.records], state.taskRecordsPerStatusLimit);
       return { record, startedAtMs };
     };
     const mergeRows = (data, task, profileUrl) => {
@@ -181,7 +198,7 @@ export function createWeiboProfileMonitor(settings) {
         existing.set(row.id, { ...existing.get(row.id), ...tagTaskDataRow(row, task) });
       }
       const ordered = [...rows.map((row) => existing.get(row.id)).filter(Boolean), ...state.dataRows.filter((row) => !rows.some((next) => next.id === row.id))];
-      state.dataRows = ordered.slice(0, MAX_STORED_RESULTS);
+      state.dataRows = applyItemLimit(ordered, state.dataStorageLimit);
       return { added, count: rows.length };
     };
     const startRun = async () => {
@@ -199,6 +216,8 @@ export function createWeiboProfileMonitor(settings) {
       };
       activeRun = control; activeRuns.set(runScope, control); state.running = true; state.stopping = false;
       state.notice = { tone: "info", text: `正在准备 ${profileUrls.length} 个${platformName}${subjectLabel}…` }; saveState(state); render();
+      await setFeatureRunning(featureKey, true);
+      const taskTimeoutSeconds = await loadTaskTimeoutSeconds();
       let addedTotal = 0; let completedRounds = 0;
       try {
         do {
@@ -225,7 +244,7 @@ export function createWeiboProfileMonitor(settings) {
               saveState(state);
               render();
               try {
-                const response = await sendMessage({
+                const response = await runWithTaskTimeout(() => sendMessage({
                   type: settings.captureMessage,
                   options: {
                     runId: captureRunId,
@@ -234,6 +253,12 @@ export function createWeiboProfileMonitor(settings) {
                     [targetOptionKey]: profileUrl,
                     ...(hasLimit ? { limit: state.limit } : {})
                   }
+                }), {
+                  timeoutSeconds: taskTimeoutSeconds,
+                  onTimeout: () => sendMessage({
+                    type: settings.stopMessage,
+                    options: { runId: captureRunId }
+                  }).catch(() => null)
                 });
                 if (control.stopRequested) {
                   finishRecord(current.record.id, current.startedAtMs, "stopped");
@@ -269,6 +294,7 @@ export function createWeiboProfileMonitor(settings) {
         const message = error.message || String(error);
         state.notice = control.stopRequested ? { tone: "warning", text: "任务已停止。" } : { tone: "error", text: message }; state.tab = "records";
       } finally {
+        await setFeatureRunning(featureKey, false);
         if (activeRuns.get(runScope) === control) activeRuns.delete(runScope);
         if (activeRun === control) activeRun = null;
         state.running = false; state.stopping = false; saveState(state); render(); globalThis.dispatchEvent?.(new Event(eventName));
@@ -285,7 +311,7 @@ export function createWeiboProfileMonitor(settings) {
     const handleLiveRunFinished = async () => {
       if (activeRuns.get(runScope) || !state.running) return;
       const latest = await loadSavedState().catch(() => null);
-      state.running = false; state.stopping = false; state.records = limitProfileRecordsPerStatus(latest?.records || state.records); state.dataRows = Array.isArray(latest?.dataRows) ? latest.dataRows.slice(0, MAX_STORED_RESULTS) : state.dataRows; state.notice = latest?.notice || state.notice; render();
+      state.running = false; state.stopping = false; state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit); state.dataRows = Array.isArray(latest?.dataRows) ? applyItemLimit(latest.dataRows, state.dataStorageLimit) : state.dataRows; state.notice = latest?.notice || state.notice; render();
     };
     const closeModal = () => { state.taskDetailRecordId = ""; state.batchOpen = false; state.guideOpen = false; render(); };
     const handleClick = (event) => {

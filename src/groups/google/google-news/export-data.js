@@ -4,9 +4,9 @@ export function buildGoogleNewsExportRows(dataRows) {
     title: row.title || "",
     description: row.description || row.desc || "",
     source: row.source || "",
-    publishedAt: row.time || "",
+    publishedAt: row.publishedAt || "",
     url: row.url || "",
-    collectedAt: row.capturedAt || ""
+    collectedAt: row.collectedAt || ""
   }));
 }
 

@@ -42,65 +42,39 @@ export function extractGoogleNewsResults(options) {
 
   function timeLabelFrom(textLines) {
     return textLines.find((line) => (
-      /(\d+\s*(秒|分钟|小时|minute|minutes|hour|hours)\s*(前|ago)?|刚刚|just now|less than an hour)/i.test(line)
+      /(\d+\s*(秒|分钟|小时|天|周|个月|年|seconds?|minutes?|hours?|days?|weeks?|months?|years?)\s*(前|ago)|刚刚|今天|昨天|前天|just now|today|yesterday|less than an hour|\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}|\d{1,2}[-/.月]\d{1,2})/i.test(line)
     )) || "";
   }
 
-  function pad(number) {
-    return String(number).padStart(2, "0");
+  function machineTimeFrom(node) {
+    if (!node) return "";
+    const value = clean(
+      node.getAttribute("datetime")
+      || node.getAttribute("data-time")
+      || node.getAttribute("data-ts")
+      || node.getAttribute("data-timestamp")
+    );
+    if (!/^\d{10,13}$/.test(value)) return value;
+    const timestamp = Number(value) * (value.length === 10 ? 1000 : 1);
+    const date = new Date(timestamp);
+    return Number.isNaN(date.getTime()) ? "" : date.toISOString();
   }
 
-  function formatDateTime(date) {
-    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  }
-
-  function absoluteTimeFromLabel(label) {
-    const text = clean(label).toLowerCase();
-    if (!text) {
-      return "";
-    }
-
-    const date = new Date();
-    if (/刚刚|just now/.test(text)) {
-      return formatDateTime(date);
-    }
-    if (/less than an hour/.test(text)) {
-      date.setMinutes(date.getMinutes() - 30);
-      return formatDateTime(date);
-    }
-
-    const seconds = text.match(/(\d+)\s*(秒|second|seconds)/i);
-    const minutes = text.match(/(\d+)\s*(分钟|minute|minutes|min|mins)/i);
-    const hours = text.match(/(\d+)\s*(小时|hour|hours|hr|hrs)/i);
-    if (seconds) {
-      date.setSeconds(date.getSeconds() - Number(seconds[1]));
-      return formatDateTime(date);
-    }
-    if (minutes) {
-      date.setMinutes(date.getMinutes() - Number(minutes[1]));
-      return formatDateTime(date);
-    }
-    if (hours) {
-      date.setHours(date.getHours() - Number(hours[1]));
-      return formatDateTime(date);
-    }
-
-    const numericDate = text.match(/(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})[日\s]*(?:(\d{1,2})[:：](\d{1,2}))?/);
-    if (!numericDate) {
-      return "";
-    }
-
-    return formatDateTime(new Date(
-      Number(numericDate[1]),
-      Number(numericDate[2]) - 1,
-      Number(numericDate[3]),
-      Number(numericDate[4] || 0),
-      Number(numericDate[5] || 0)
-    ));
+  function findPublication(container, textLines) {
+    const timeNode = container.querySelector("time, [datetime], [data-time], [data-ts], [data-timestamp]");
+    const label = clean(timeNode?.innerText || timeNode?.textContent) || timeLabelFrom(textLines);
+    const machineTime = machineTimeFrom(timeNode);
+    return {
+      label,
+      machineTime,
+      raw: machineTime || label
+    };
   }
 
   function findNewsContainer(anchor) {
-    const explicit = anchor.closest("div.SoaBEf, div.MjjYud");
+    // 新版 Google 新闻以 a.aJWbwf / div.SoAPf 作为单条新闻边界。
+    // MjjYud 可能同时包住多条结果，必须优先使用离链接最近的单卡片节点。
+    const explicit = anchor.closest("a.aJWbwf, div.SoAPf, div.SoaBEf, div.MjjYud");
     if (explicit) {
       return explicit;
     }
@@ -163,14 +137,17 @@ export function extractGoogleNewsResults(options) {
     }
 
     const textLines = lines(container.innerText);
-    const timeLabel = timeLabelFrom(textLines);
+    const publication = findPublication(container, textLines);
+    const timeLabel = publication.label;
     const source = findSource(textLines, title, timeLabel);
     seen.add(url);
     results.push({
       title,
       description: findSnippet(textLines, title, source, timeLabel),
       url,
-      time: absoluteTimeFromLabel(timeLabel),
+      publishedAtRaw: publication.raw,
+      publishedAtLabel: timeLabel,
+      publishedAtTimestamp: publication.machineTime,
       source
     });
   }

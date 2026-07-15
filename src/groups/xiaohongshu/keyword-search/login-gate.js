@@ -30,6 +30,31 @@ function sendMessage(message) {
   });
 }
 
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    const schedule = globalThis.requestAnimationFrame || ((callback) => setTimeout(callback, 0));
+    schedule(() => schedule(resolve));
+  });
+}
+
+function renderProgress(state) {
+  const stages = [
+    ["preparing", "准备检测", "正在建立小红书检测连接"],
+    ["checking", "读取登录状态", "正在确认当前 Chrome Profile"],
+    ["ready", "进入功能", "登录确认后加载关键词搜索" ]
+  ];
+  const stageIndex = stages.findIndex(([id]) => id === state.step);
+  const activeIndex = stageIndex >= 0 ? stageIndex : state.phase === "logged_out" || state.phase === "error" ? 1 : 0;
+  return `
+    <ol class="xhs-login-progress" aria-label="登录检测进度">
+      ${stages.map(([id, title, description], index) => {
+        const status = index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
+        return `<li class="${status}"><span aria-hidden="true">${status === "done" ? "✓" : index + 1}</span><div><strong>${title}</strong><small>${description}</small></div></li>`;
+      }).join("")}
+    </ol>
+  `;
+}
+
 function gateTemplate(state, context) {
   const featureName = context?.feature?.name || "关键词搜索";
   const isChecking = state.phase === "checking";
@@ -63,6 +88,7 @@ function gateTemplate(state, context) {
         <div class="xhs-login-icon" aria-hidden="true">小红书</div>
         <h2>${isLoggedOut ? "请先登录小红书" : "正在确认小红书登录状态"}</h2>
         <p>${escapeHtml(state.message)}</p>
+        ${renderProgress(state)}
         <ol class="xhs-login-steps">
           <li>在当前 Chrome Profile 的小红书标签页完成登录。</li>
           <li>回到扩展，点击“重新检测”。</li>
@@ -90,8 +116,9 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
   const mountMonitor = options.mountMonitor || mountXiaohongshuKeywordMonitor;
   const state = {
     phase: isExtensionRuntime() ? "checking" : "unavailable",
+    step: isExtensionRuntime() ? "preparing" : "",
     message: isExtensionRuntime()
-      ? "正在打开或复用小红书页面，并检查当前 Chrome Profile 的登录状态…"
+      ? "正在准备小红书登录检测，检测页会在后台打开，不会打断当前操作。"
       : "网页预览无法读取 Chrome Profile 的登录状态。"
   };
 
@@ -111,7 +138,13 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
     if (!isExtensionRuntime() || disposed || monitorCleanup) return;
     const currentRequestId = ++requestId;
     state.phase = "checking";
-    state.message = "正在检查当前 Chrome Profile 的小红书登录状态…";
+    state.step = "preparing";
+    state.message = "正在准备登录检测，检测页会在后台打开。";
+    render();
+    await waitForNextPaint();
+    if (disposed || currentRequestId !== requestId || monitorCleanup) return;
+    state.step = "checking";
+    state.message = "正在后台读取当前 Chrome Profile 的小红书登录状态…";
     render();
 
     try {
@@ -121,15 +154,21 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
         throw new Error(response?.error || "登录状态检测失败。");
       }
       if (response.loggedIn) {
+        state.step = "ready";
+        state.message = "已确认登录状态，正在进入关键词搜索功能…";
+        render();
+        await waitForNextPaint();
         await enterFeature();
         return;
       }
       state.phase = response.state === "logged_out" ? "logged_out" : "error";
+      state.step = "";
       state.message = response.reason || "尚未确认登录状态，请打开小红书页面完成登录后重新检测。";
       render();
     } catch (error) {
       if (disposed || currentRequestId !== requestId || monitorCleanup) return;
       state.phase = "error";
+      state.step = "";
       state.message = error.message || "登录状态检测失败，请重新检测。";
       render();
     }
@@ -138,6 +177,7 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
   const openLoginPage = async () => {
     if (!isExtensionRuntime() || disposed || monitorCleanup) return;
     state.phase = "checking";
+    state.step = "checking";
     state.message = "正在打开小红书登录页，请在该标签页完成登录。";
     render();
     try {
@@ -147,11 +187,13 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
       }
       if (disposed || monitorCleanup) return;
       state.phase = "logged_out";
+      state.step = "";
       state.message = "小红书页面已打开。完成登录、验证码或扫码后，回到这里点击“重新检测”。";
       render();
     } catch (error) {
       if (disposed || monitorCleanup) return;
       state.phase = "error";
+      state.step = "";
       state.message = error.message || "无法打开小红书登录页。";
       render();
     }

@@ -11,6 +11,7 @@
       "name": "Google",
       "description": "围绕 Google 搜索和资讯产品组织数据采集能力。",
       "icon": "GO",
+      "image": "assets/images/google.svg",
       "features": [
         {
           "id": "google-news",
@@ -27,6 +28,7 @@
       "name": "微博",
       "description": "采集微博主页、博文详情和相关公开数据。",
       "icon": "WB",
+      "image": "assets/images/weibo.svg",
       "features": [
         {
           "id": "profile-posts",
@@ -59,6 +61,7 @@
       "name": "抖音",
       "description": "采集抖音博主主页、作品详情和相关公开数据。",
       "icon": "DY",
+      "image": "assets/images/douyin.svg",
       "features": [
         {
           "id": "profile-posts",
@@ -91,6 +94,7 @@
       "name": "小红书",
       "description": "采集小红书搜索、用户主页和公开笔记数据。",
       "icon": "XHS",
+      "image": "assets/images/xiaohongshu.svg",
       "features": [
         {
           "id": "keyword-search",

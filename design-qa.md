@@ -57,7 +57,7 @@ The v0.4.2 closed/open comparison uses the established 390 × 844 feature screen
 - Modal dismissal: the top-right X, the “知道了” action and Escape all close the dialog, restore `aria-expanded="false"`, and return focus to the title-row trigger.
 - Page preservation: opening and closing the instructions from 数据(0) leaves 数据(0) selected. The visible feature tabs remain exactly 运行参数、运行记录(0) and 数据(0); the help content no longer replaces the workspace.
 - Browser console warnings/errors: none.
-- Keyword interval: the form exposes a millisecond range such as `100 - 1000 ms`; each keyword gap samples the range again. JSON mode receives the min/max pair, legacy single-value settings are migrated, reversed bounds are normalized, and an automated wait-path check confirms a seeded midpoint is passed to the real wait function.
+- Keyword interval: every feature defaults to `1000 - 6000 ms`; each task gap samples the range again. JSON mode receives the min/max pair, legacy single-value settings are migrated, reversed bounds are normalized, and an automated wait-path check confirms a seeded midpoint is passed to the real wait function.
 
 **Findings**
 
@@ -113,3 +113,59 @@ final result: passed
 没有遗留的 P0/P1/P2 视觉或交互问题。
 
 **Final result:** passed
+
+---
+
+## 全局设置页面（2026-07-15）
+
+### Evidence
+
+- Source visual truth: `/var/folders/g2/r66gs5k91ks54x8_tm4935mh0000gn/T/codex-clipboard-331b32b8-f024-4e5b-a93e-25ec41c30892.png`
+- Browser-rendered full implementation: `.qa/settings-desktop.png`
+- Focused source/implementation comparison: `.qa/settings-tabs-comparison.png`
+- Desktop viewport: 1280 × 768
+- Responsive viewport: 390 × 844
+- State: 设置 / 基础 active; Limit and 存储 also opened and inspected
+
+### Full-view comparison evidence
+
+The source provides the horizontal settings-navigation pattern rather than a complete product settings screen. The implementation keeps the existing BrowserCoreClaw header and design tokens, then places a compact, full-width category strip directly below the settings heading. The active category uses the same thin warm-red underline and neutral inactive labels as the reference. The settings content below the strip deliberately follows the product's existing white surface, green scope badge, compact form-control, and border system.
+
+### Focused region comparison evidence
+
+`.qa/settings-tabs-comparison.png` places the 1222 × 50 source navigation above the 1132 × 46 implementation capture. The implementation matches the source's single-row rhythm, low-height divider, centered tab labels, thin active underline, and quiet inactive state. It contains only 基础、Limit、存储 because those are the requested product categories. Reference-specific GitHub destinations and icons are intentionally not copied.
+
+### Required fidelity surfaces
+
+- Fonts and typography: the existing Inter/system Chinese stack is preserved. Category labels use 13 px semibold text and retain clear active/inactive hierarchy. Form titles, labels, descriptions, helper text, and values remain readable at desktop and 390 px.
+- Spacing and layout rhythm: the reference's 40 px navigation is represented by a 46 px strip, including a practical pointer/touch target. Desktop form rows use a two-column information/control layout; at 390 px they collapse to one column without horizontal overflow.
+- Colors and visual tokens: the reference's warm-red active underline is preserved while surfaces, input focus, status notices, and scope badges reuse BrowserCoreClaw's existing green and neutral tokens.
+- Image quality and asset fidelity: the reference does not prescribe product imagery. The configurable Logo uses the uploaded raster image at native aspect ratio with `object-fit: cover`; the product's existing BC fallback remains sharp at both header and preview sizes.
+- Copy and content: 基础 explains global name/Logo behavior, Limit describes the 120-second task maximum and failure behavior, and 存储 clearly states that only local storage is currently available.
+- Icons: GitHub-specific reference icons were not relevant to the three requested BrowserCoreClaw categories, so no placeholder or custom icon substitutes were introduced.
+
+### Interaction and functional checks
+
+- The 基础、Limit and 存储 categories each open their matching region and expose semantic labels.
+- Changing the name enabled 保存设置; saving updated both the header brand and document title immediately and displayed a success notice.
+- 恢复全部默认值 followed by 保存设置 restored BrowserCoreClaw and removed test state.
+- Limit displayed 120 秒 / S by default and exposed the requested 10–86400 input range.
+- 存储 displayed 本地（当前使用）; 其他（即将支持） was visible and disabled.
+- Logo upload validates PNG/JPG/WebP/GIF and a 1 MB maximum; default-logo restoration is disabled when no custom Logo exists.
+- At 390 × 844, document `scrollWidth` and `clientWidth` were both 390; no page-level horizontal overflow occurred.
+- Browser console warnings/errors: none.
+- Automated validation covered settings normalization, default values, unsupported-storage fallback, timeout rejection, and timeout-triggered stop behavior.
+
+### Findings
+
+No actionable P0, P1, or P2 visual, responsive, accessibility, or core-interaction findings remain.
+
+### Comparison history
+
+- Pass 1: no P0/P1/P2 mismatch was found. The reference navigation pattern, existing application design system, responsive form behavior, and required settings interactions were all present, so no corrective visual iteration was required.
+
+### Follow-up polish
+
+- P3: validate a real custom Logo upload in the unpacked Chrome extension after reload; browser automation verified the control and validation states but did not attach a user image.
+
+final result: passed

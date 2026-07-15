@@ -17,16 +17,29 @@ import {
   normalizeTaskConcurrency,
   runConcurrentTasks
 } from "../../../shared/concurrent-task-pool.js";
+import { setFeatureRunning } from "../../../shared/feature-run-status.js";
+import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
+import {
+  applyItemLimit,
+  DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
+  formatLimitValue,
+  limitItemsPerGroup,
+  loadGlobalStorageLimits
+} from "../../../shared/storage-limits.js";
+import {
+  DEFAULT_EXECUTION_INTERVAL_MAX_MS,
+  DEFAULT_EXECUTION_INTERVAL_MIN_MS,
+  migrateLegacyExecutionInterval
+} from "../../../shared/execution-interval.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileV1";
-const MAX_RECORDS_PER_STATUS = 200;
-const MAX_STORED_RESULTS = 3000;
+const FEATURE_KEY = "xiaohongshu/profile-notes";
 const ALL_RECORD_FILTER = "__all__";
 const DEFAULT_PROFILE_URLS = [""];
 const DEFAULT_OPTIONS = Object.freeze({
   limit: 20,
-  intervalMinMs: 100,
-  intervalMaxMs: 6000,
+  intervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS,
+  intervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS,
   concurrency: DEFAULT_TASK_CONCURRENCY,
   polling: false,
   pollingMinutes: 10
@@ -156,17 +169,12 @@ function normalizeRecord(record, index = 0) {
   };
 }
 
-export function limitProfileRecordsPerStatus(records, limit = MAX_RECORDS_PER_STATUS) {
-  const counts = new Map();
-  return (Array.isArray(records) ? records : [])
-    .map(normalizeRecord)
-    .filter((record) => {
-      const statusKey = getProfileRecordStatusKey(record);
-      const count = counts.get(statusKey) || 0;
-      if (count >= limit) return false;
-      counts.set(statusKey, count + 1);
-      return true;
-    });
+export function limitProfileRecordsPerStatus(records, limit = DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT) {
+  return limitItemsPerGroup(
+    (Array.isArray(records) ? records : []).map(normalizeRecord),
+    getProfileRecordStatusKey,
+    limit
+  );
 }
 
 export function filterProfileRecords(records, filters = {}) {
@@ -178,12 +186,18 @@ export function filterProfileRecords(records, filters = {}) {
   ));
 }
 
-export function updateProfileRecord(records, recordId, patch = {}) {
+export function updateProfileRecord(
+  records,
+  recordId,
+  patch = {},
+  limit = DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT
+) {
   const targetId = String(recordId || "");
   return limitProfileRecordsPerStatus(
     (Array.isArray(records) ? records : []).map((record) => (
       String(record?.id || "") === targetId ? { ...record, ...patch } : record
-    ))
+    )),
+    limit
   );
 }
 
@@ -226,8 +240,8 @@ function saveState(state) {
         polling: Boolean(state.polling),
         pollingMinutes: asInteger(state.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440)
       },
-      records: limitProfileRecordsPerStatus(state.records),
-      dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS),
+      records: limitProfileRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
+      dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
       notice: state.notice
     }
   }).catch(() => {});
@@ -351,7 +365,7 @@ function renderRecords(state) {
   const records = filterProfileRecords(state.records, state.recordFilters);
   return `
     <section class="xhs-content-card xhs-table-page">
-      <div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个博主主页独立记录；每一种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条。</p></div></div>
+      <div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个博主主页独立记录；每一种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}。</p></div></div>
       ${renderRecordFilters(state, records.length)}
       <div class="xhs-table-shell records" tabindex="0" aria-label="可滚动的博主采集运行记录表格">
         <table class="xhs-table">
@@ -372,7 +386,7 @@ function renderRecords(state) {
 function renderData(state) {
   return `
     <section class="xhs-content-card xhs-table-page">
-      <div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${MAX_STORED_RESULTS} 条；博文按主页卡片原始顺序保存。</p></div></div>
+      <div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；博文按主页卡片原始顺序保存。</p></div></div>
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的博文数据表格">
         <table class="xhs-table xhs-data-table">
           <thead><tr><th>顺序</th><th>博文 ID</th><th>博文标题</th><th>作者</th><th>点赞</th><th>博文链接</th><th>封面</th><th>采集时间</th></tr></thead>
@@ -438,10 +452,10 @@ function renderActionBar(state) {
     <footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原输入</button><span>${state.running ? "任务运行中，参数已锁定；可以停止任务。" : "运行会打开小红书博主主页，等待列表稳定后采集主页博文。"}</span></footer>
   `;
   if (state.tab === "records") return `
-    <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条</span></footer>
+    <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>
   `;
   return `
-    <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${MAX_STORED_RESULTS} 条</span></footer>
+    <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>
   `;
 }
 
@@ -481,22 +495,31 @@ function mergeDataRows(state, data, task) {
   const incomingIds = new Set(taggedIncoming.map((row) => row.id));
   const priorIds = new Set(state.dataRows.map((row) => row.id));
   const added = taggedIncoming.filter((row) => !priorIds.has(row.id)).length;
-  state.dataRows = [
+  state.dataRows = applyItemLimit([
     ...taggedIncoming,
     ...state.dataRows.filter((row) => !incomingIds.has(row.id))
-  ].slice(0, MAX_STORED_RESULTS);
+  ], state.dataStorageLimit);
   return added;
 }
 
 export async function mountXiaohongshuProfileNotesMonitor(container, context) {
+  const storageLimits = await loadGlobalStorageLimits().catch(() => ({
+    dataStorageLimit: 3000,
+    taskRecordsPerStatusLimit: 200
+  }));
   const saved = await loadSavedState().catch(() => null);
-  const savedConfig = saved?.config || {};
+  const savedConfig = migrateLegacyExecutionInterval(saved?.config || {}, {
+    legacyMinMs: 100,
+    legacyMaxMs: 6000
+  });
   const savedInterval = normalizeProfileIntervalRange(savedConfig);
   const state = {
     tab: "params",
     profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS],
-    records: limitProfileRecordsPerStatus(saved?.records),
-    dataRows: Array.isArray(saved?.dataRows) ? saved.dataRows.slice(0, MAX_STORED_RESULTS) : [],
+    dataStorageLimit: storageLimits.dataStorageLimit,
+    taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit,
+    records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit),
+    dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit),
     batchOpen: false,
     batchDraft: "",
     guideOpen: false,
@@ -513,6 +536,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
     notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集主页博文。" }
   };
+  saveState(state);
   let disposed = false;
   let activeRun = activeProfileRun;
 
@@ -536,7 +560,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       resultCount: Number(resultCount) || 0,
       error,
       duration: formatDuration(Date.now() - startedAtMs)
-    });
+    }, state.taskRecordsPerStatusLimit);
   };
   const createRecord = (control, profileUrl, round, index) => {
     const startedAtMs = Date.now();
@@ -554,7 +578,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       error: ""
     };
     state.records.unshift(record);
-    state.records = limitProfileRecordsPerStatus(state.records);
+    state.records = limitProfileRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit);
     return {
       record: state.records.find((item) => item.id === record.id) || record,
       startedAtMs
@@ -595,6 +619,8 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     saveState(state);
     render();
 
+    await setFeatureRunning(FEATURE_KEY, true);
+    const taskTimeoutSeconds = await loadTaskTimeoutSeconds();
     let addedTotal = 0;
     let completedRounds = 0;
     try {
@@ -623,9 +649,15 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
             saveState(state);
             render();
             try {
-              const response = await sendMessage({
+              const response = await runWithTaskTimeout(() => sendMessage({
                 type: MESSAGE_CAPTURE_XIAOHONGSHU_PROFILE,
                 options: { runId: captureRunId, tabId: null, isolated: true, profileUrl, limit: state.limit }
+              }), {
+                timeoutSeconds: taskTimeoutSeconds,
+                onTimeout: () => sendMessage({
+                  type: MESSAGE_STOP_XIAOHONGSHU_PROFILE,
+                  options: { runId: captureRunId }
+                }).catch(() => null)
               });
               if (control.stopRequested) {
                 finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "stopped");
@@ -674,6 +706,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       state.notice = control.stopRequested ? { tone: "warning", text: `任务已停止，停止前新增 ${addedTotal} 条数据。` } : { tone: "error", text: errorText };
       state.tab = "records";
     } finally {
+      await setFeatureRunning(FEATURE_KEY, false);
       if (activeProfileRun === control) activeProfileRun = null;
       if (activeRun === control) activeRun = null;
       state.running = false;
@@ -701,8 +734,10 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     const latest = await loadSavedState().catch(() => null);
     state.running = false;
     state.stopping = false;
-    state.records = limitProfileRecordsPerStatus(latest?.records || state.records);
-    state.dataRows = Array.isArray(latest?.dataRows) ? latest.dataRows.slice(0, MAX_STORED_RESULTS) : state.dataRows;
+    state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+    state.dataRows = Array.isArray(latest?.dataRows)
+      ? applyItemLimit(latest.dataRows, state.dataStorageLimit)
+      : state.dataRows;
     state.notice = latest?.notice || state.notice;
     render();
   };

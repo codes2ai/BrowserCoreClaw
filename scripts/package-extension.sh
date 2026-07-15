@@ -13,6 +13,7 @@ cd "$ROOT_DIR"
 zip -q -r "$OUTPUT" \
   manifest.json \
   sidepanel.html \
+  assets \
   src \
   README.md
 

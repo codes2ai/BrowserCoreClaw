@@ -24,13 +24,24 @@ import {
   normalizeTaskConcurrency,
   runConcurrentTasks
 } from "../../../shared/concurrent-task-pool.js";
+import { setFeatureRunning } from "../../../shared/feature-run-status.js";
+import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
+import {
+  applyItemLimit,
+  formatLimitValue,
+  loadGlobalStorageLimits
+} from "../../../shared/storage-limits.js";
+import {
+  DEFAULT_EXECUTION_INTERVAL_MAX_MS,
+  DEFAULT_EXECUTION_INTERVAL_MIN_MS,
+  migrateLegacyExecutionInterval
+} from "../../../shared/execution-interval.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileInfoV1";
-const MAX_RECORDS_PER_STATUS = 200;
-const MAX_STORED_RESULTS = 3000;
+const FEATURE_KEY = "xiaohongshu/profile-info";
 const ALL_RECORD_FILTER = "__all__";
 const DEFAULT_PROFILE_URLS = [""];
-const DEFAULT_OPTIONS = Object.freeze({ intervalMinMs: 100, intervalMaxMs: 6000, concurrency: DEFAULT_TASK_CONCURRENCY, polling: false, pollingMinutes: 10 });
+const DEFAULT_OPTIONS = Object.freeze({ intervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS, intervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS, concurrency: DEFAULT_TASK_CONCURRENCY, polling: false, pollingMinutes: 10 });
 const STATUS = Object.freeze({
   running: { label: "运行中", tone: "running" },
   success: { label: "完成", tone: "success" },
@@ -117,8 +128,8 @@ function saveState(state) {
     [STORAGE_KEY]: {
       profileUrls: uniqueUrls(state.profileUrls),
       config: { ...normalizeProfileIntervalRange(state), concurrency: normalizeTaskConcurrency(state.concurrency), polling: Boolean(state.polling), pollingMinutes: asInteger(state.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440) },
-      records: limitProfileRecordsPerStatus(state.records),
-      dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS),
+      records: limitProfileRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
+      dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
       notice: state.notice
     }
   }).catch(() => {});
@@ -162,11 +173,11 @@ function renderRecordFilters(state, filteredCount) {
 
 function renderRecords(state) {
   const records = filterProfileRecords(state.records, state.recordFilters);
-  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个博主主页独立记录；每种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条。</p></div></div>${renderRecordFilters(state, records.length)}<div class="xhs-table-shell records" tabindex="0"><table class="xhs-table"><thead><tr><th>任务编号</th><th>开始时间</th><th>博主主页</th><th>轮次</th><th>状态</th><th>信息数</th><th>耗时</th></tr></thead><tbody>${records.length ? records.map((record) => `<tr><td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}"><code>${escapeHtml(getTaskId(record))}</code></button></td><td>${escapeHtml(record.startedAt)}</td><td class="xhs-profile-url-cell" title="${escapeHtml(record.keyword)}">${escapeHtml(record.keyword)}</td><td>${escapeHtml(record.round)}</td><td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${escapeHtml(record.duration)}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody></table></div></section>`;
+  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个博主主页独立记录；每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}。</p></div></div>${renderRecordFilters(state, records.length)}<div class="xhs-table-shell records" tabindex="0"><table class="xhs-table"><thead><tr><th>任务编号</th><th>开始时间</th><th>博主主页</th><th>轮次</th><th>状态</th><th>信息数</th><th>耗时</th></tr></thead><tbody>${records.length ? records.map((record) => `<tr><td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}"><code>${escapeHtml(getTaskId(record))}</code></button></td><td>${escapeHtml(record.startedAt)}</td><td class="xhs-profile-url-cell" title="${escapeHtml(record.keyword)}">${escapeHtml(record.keyword)}</td><td>${escapeHtml(record.round)}</td><td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${escapeHtml(record.duration)}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody></table></div></section>`;
 }
 
 function renderData(state) {
-  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${MAX_STORED_RESULTS} 条；每个主页仅保留最新一条博主资料。</p></div></div><div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table"><thead><tr><th>头像</th><th>昵称</th><th>小红书号</th><th>IP属地</th><th>简介</th><th>标签</th><th>关注</th><th>粉丝</th><th>获赞与收藏</th><th>主页链接</th><th>采集时间</th></tr></thead><tbody>${state.dataRows.length ? state.dataRows.map((row) => `<tr><td>${row.avatar ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.avatar)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.nickname || "-")}</td><td>${escapeHtml(row.xiaohongshuId || "-")}</td><td>${escapeHtml(row.ipLocation || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.bio || "")}">${escapeHtml(row.bio || "-")}</td><td>${escapeHtml(row.tags || "-")}</td><td>${escapeHtml(row.following || "-")}</td><td>${escapeHtml(row.followers || "-")}</td><td>${escapeHtml(row.likedAndCollected || "-")}</td><td>${row.profileUrl ? `<a href="${escapeHtml(row.profileUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="11">运行后，博主信息会显示在这里</td></tr>`}</tbody></table></div></section>`;
+  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每个主页仅保留最新一条博主资料。</p></div></div><div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table"><thead><tr><th>头像</th><th>昵称</th><th>小红书号</th><th>IP属地</th><th>简介</th><th>标签</th><th>关注</th><th>粉丝</th><th>获赞与收藏</th><th>主页链接</th><th>采集时间</th></tr></thead><tbody>${state.dataRows.length ? state.dataRows.map((row) => `<tr><td>${row.avatar ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.avatar)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.nickname || "-")}</td><td>${escapeHtml(row.xiaohongshuId || "-")}</td><td>${escapeHtml(row.ipLocation || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.bio || "")}">${escapeHtml(row.bio || "-")}</td><td>${escapeHtml(row.tags || "-")}</td><td>${escapeHtml(row.following || "-")}</td><td>${escapeHtml(row.followers || "-")}</td><td>${escapeHtml(row.likedAndCollected || "-")}</td><td>${row.profileUrl ? `<a href="${escapeHtml(row.profileUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="11">运行后，博主信息会显示在这里</td></tr>`}</tbody></table></div></section>`;
 }
 
 function renderBatchModal(state) {
@@ -190,8 +201,8 @@ function renderRunButton(state, className = "") {
 
 function renderActionBar(state) {
   if (state.tab === "params") return `<footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原输入</button><span>${state.running ? "任务运行中，参数已锁定；可以停止任务。" : "运行会打开小红书博主主页并采集资料区。"}</span></footer>`;
-  if (state.tab === "records") return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条</span></footer>`;
-  return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${MAX_STORED_RESULTS} 条</span></footer>`;
+  if (state.tab === "records") return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>`;
+  return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>`;
 }
 
 function renderPage(state, context) {
@@ -207,29 +218,37 @@ function mergeInfoRow(state, data, task) {
   const row = tagTaskDataRow({ id, ...profile, capturedAt: data.capturedAt || new Date().toISOString() }, task);
   const previous = new Map(state.dataRows.map((item) => [item.id, item]));
   const added = previous.has(id) ? 0 : 1;
-  state.dataRows = [{ ...previous.get(id), ...row }, ...state.dataRows.filter((item) => item.id !== id)].slice(0, MAX_STORED_RESULTS);
+  state.dataRows = applyItemLimit(
+    [{ ...previous.get(id), ...row }, ...state.dataRows.filter((item) => item.id !== id)],
+    state.dataStorageLimit
+  );
   return added;
 }
 
 export async function mountXiaohongshuProfileInfoMonitor(container, context) {
+  const storageLimits = await loadGlobalStorageLimits().catch(() => ({ dataStorageLimit: 3000, taskRecordsPerStatusLimit: 200 }));
   const saved = await loadSavedState().catch(() => null);
-  const savedConfig = saved?.config || {};
+  const savedConfig = migrateLegacyExecutionInterval(saved?.config || {}, {
+    legacyMinMs: 100,
+    legacyMaxMs: 6000
+  });
   const savedInterval = normalizeProfileIntervalRange(savedConfig);
   const state = {
-    tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS], records: limitProfileRecordsPerStatus(saved?.records), dataRows: Array.isArray(saved?.dataRows) ? saved.dataRows.slice(0, MAX_STORED_RESULTS) : [], batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedInterval.intervalMinMs, intervalMaxMs: savedInterval.intervalMaxMs, polling: Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeInfoRun && !activeInfoRun.stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集资料。" }
+    tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS], dataStorageLimit: storageLimits.dataStorageLimit, taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit, records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit), dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit), batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedInterval.intervalMinMs, intervalMaxMs: savedInterval.intervalMaxMs, polling: Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeInfoRun && !activeInfoRun.stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集资料。" }
   };
+  saveState(state);
   let disposed = false;
   let activeRun = activeInfoRun;
   const render = () => { if (!disposed) container.innerHTML = renderPage(state, context); };
   const closeTask = () => { state.taskDetailRecordId = ""; render(); };
   const finishRecord = (recordId, startedAtMs, statusKey, resultCount = 0, error = "") => {
     const meta = STATUS[statusKey] || STATUS.error;
-    state.records = updateProfileRecord(state.records, recordId, { status: meta.label, statusKey, tone: meta.tone, resultCount: Number(resultCount) || 0, error, duration: formatDuration(Date.now() - startedAtMs) });
+    state.records = updateProfileRecord(state.records, recordId, { status: meta.label, statusKey, tone: meta.tone, resultCount: Number(resultCount) || 0, error, duration: formatDuration(Date.now() - startedAtMs) }, state.taskRecordsPerStatusLimit);
   };
   const createRecord = (control, profileUrl, round, index) => {
     const startedAtMs = Date.now();
     const record = { id: `${control.runId}-R${round}-P${index + 1}`, runId: control.runId, startedAt: formatTime(new Date(startedAtMs)), keyword: profileUrl, round, status: STATUS.running.label, statusKey: "running", tone: "running", resultCount: 0, duration: "-", error: "" };
-    state.records = limitProfileRecordsPerStatus([record, ...state.records]);
+    state.records = limitProfileRecordsPerStatus([record, ...state.records], state.taskRecordsPerStatusLimit);
     return { record: state.records.find((item) => item.id === record.id) || record, startedAtMs };
   };
   const startRun = async () => {
@@ -252,6 +271,8 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
     state.notice = { tone: "info", text: `正在准备 ${profileUrls.length} 个小红书博主主页…` };
     saveState(state);
     render();
+    await setFeatureRunning(FEATURE_KEY, true);
+    const taskTimeoutSeconds = await loadTaskTimeoutSeconds();
     let addedTotal = 0;
     let completedRounds = 0;
     try {
@@ -279,9 +300,15 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
             saveState(state);
             render();
             try {
-              const response = await sendMessage({
+              const response = await runWithTaskTimeout(() => sendMessage({
                 type: MESSAGE_CAPTURE_XIAOHONGSHU_PROFILE_INFO,
                 options: { runId: captureRunId, tabId: null, isolated: true, profileUrl }
+              }), {
+                timeoutSeconds: taskTimeoutSeconds,
+                onTimeout: () => sendMessage({
+                  type: MESSAGE_STOP_XIAOHONGSHU_PROFILE_INFO,
+                  options: { runId: captureRunId }
+                }).catch(() => null)
               });
               if (control.stopRequested) {
                 finishRecord(current.record.id, current.startedAtMs, "stopped");
@@ -320,6 +347,7 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
       state.notice = control.stopRequested ? { tone: "warning", text: "任务已停止。" } : { tone: "error", text: errorText };
       state.tab = "records";
     } finally {
+      await setFeatureRunning(FEATURE_KEY, false);
       if (activeInfoRun === control) activeInfoRun = null;
       if (activeRun === control) activeRun = null;
       state.running = false;
@@ -345,8 +373,8 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
     const latest = await loadSavedState().catch(() => null);
     state.running = false;
     state.stopping = false;
-    state.records = limitProfileRecordsPerStatus(latest?.records || state.records);
-    state.dataRows = Array.isArray(latest?.dataRows) ? latest.dataRows.slice(0, MAX_STORED_RESULTS) : state.dataRows;
+    state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+    state.dataRows = Array.isArray(latest?.dataRows) ? applyItemLimit(latest.dataRows, state.dataStorageLimit) : state.dataRows;
     state.notice = latest?.notice || state.notice;
     render();
   };

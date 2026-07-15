@@ -13,10 +13,24 @@ import {
   normalizeTaskConcurrency,
   runConcurrentTasks
 } from "../../../shared/concurrent-task-pool.js";
+import { setFeatureRunning } from "../../../shared/feature-run-status.js";
+import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
+import { formatLocalCalendarDate, normalizePublishedDate } from "../../../shared/date-normalizer.js";
+import {
+  applyItemLimit,
+  DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
+  formatLimitValue,
+  limitItemsPerGroup,
+  loadGlobalStorageLimits
+} from "../../../shared/storage-limits.js";
+import {
+  DEFAULT_EXECUTION_INTERVAL_MAX_MS,
+  DEFAULT_EXECUTION_INTERVAL_MIN_MS,
+  migrateLegacyExecutionInterval
+} from "../../../shared/execution-interval.js";
 
 const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
-const MAX_RECORDS_PER_STATUS = 200;
-const MAX_STORED_RESULTS = 3000;
+const FEATURE_KEY = "google/google-news";
 const ALL_RECORD_FILTER = "__all__";
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
@@ -29,8 +43,8 @@ const RECORD_STATUS_META = Object.freeze({
 const SAMPLE_CONFIG = Object.freeze({
   keywords: ["OpenAI", "人工智能"],
   limit: 20,
-  keywordIntervalMinMs: 100,
-  keywordIntervalMaxMs: 1000,
+  keywordIntervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS,
+  keywordIntervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS,
   concurrency: DEFAULT_TASK_CONCURRENCY,
   timeRange: "last_hour",
   language: "zh-CN",
@@ -171,17 +185,12 @@ function normalizeRecord(record, index = 0) {
   });
 }
 
-export function limitRecordsPerStatus(records, limit = MAX_RECORDS_PER_STATUS) {
-  const counts = new Map();
-  return (Array.isArray(records) ? records : [])
-    .map(normalizeRecord)
-    .filter((record) => {
-      const statusKey = getRecordStatusKey(record);
-      const count = counts.get(statusKey) || 0;
-      if (count >= limit) return false;
-      counts.set(statusKey, count + 1);
-      return true;
-    });
+export function limitRecordsPerStatus(records, limit = DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT) {
+  return limitItemsPerGroup(
+    (Array.isArray(records) ? records : []).map(normalizeRecord),
+    getRecordStatusKey,
+    limit
+  );
 }
 
 function wait(ms) {
@@ -303,8 +312,8 @@ function saveState(state) {
   }
   const value = {
     config: state.config,
-    records: limitRecordsPerStatus(state.records),
-    dataRows: state.dataRows.slice(0, MAX_STORED_RESULTS),
+    records: limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
+    dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
     notice: state.notice
   };
   chrome.storage.local.set({ [STORAGE_KEY]: value }).catch(() => {});
@@ -550,7 +559,7 @@ function renderRecords(state) {
   return `
     <section class="news-content-card news-table-page">
       <div class="news-panel-head">
-        <div><h2>运行记录</h2><p>每次关键词采集单独记录；每一种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条。</p></div>
+        <div><h2>运行记录</h2><p>每次关键词采集单独记录；每一种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}。</p></div>
       </div>
       ${renderRecordFilters(state, records.length)}
       <div class="news-table-shell records" tabindex="0" aria-label="可滚动的运行记录表格">
@@ -590,11 +599,11 @@ function renderData(state) {
   return `
     <section class="news-content-card news-table-page">
       <div class="news-panel-head">
-        <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${MAX_STORED_RESULTS} 条；表格支持横向与纵向滚动。</p></div>
+        <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；发布时间来自新闻卡片，采集时间为任务实际获取日期。</p></div>
       </div>
       <div class="news-table-shell data" tabindex="0" aria-label="可滚动的 Google 新闻采集数据表格">
         <table class="news-table news-data-table">
-          <thead><tr><th>关键词</th><th>新闻标题</th><th>描述</th><th>来源</th><th>发布时间</th><th>链接</th></tr></thead>
+          <thead><tr><th>关键词</th><th>新闻标题</th><th>描述</th><th>来源</th><th>发布时间</th><th>采集时间</th><th>链接</th></tr></thead>
           <tbody>
             ${state.dataRows.length ? state.dataRows.map((row) => `
               <tr>
@@ -602,10 +611,11 @@ function renderData(state) {
                 <td class="news-title-cell" title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</td>
                 <td class="news-description-cell" title="${escapeHtml(row.description || row.desc || "")}">${escapeHtml(row.description || row.desc || "-")}</td>
                 <td>${escapeHtml(row.source || "-")}</td>
-                <td>${escapeHtml(row.time || "-")}</td>
+                <td>${escapeHtml(row.publishedAt || "-")}</td>
+                <td>${escapeHtml(row.collectedAt || "-")}</td>
                 <td><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a></td>
               </tr>
-            `).join("") : `<tr><td class="news-table-empty" colspan="6">运行后，Google 新闻结果会显示在这里</td></tr>`}
+            `).join("") : `<tr><td class="news-table-empty" colspan="7">运行后，Google 新闻结果会显示在这里</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -666,7 +676,7 @@ function renderActionBar(state) {
     return `
       <footer class="news-action-bar news-table-action-bar">
         <button class="news-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button>
-        <span>当前 ${state.records.length} 条 · 每种状态最多保留 ${MAX_RECORDS_PER_STATUS} 条</span>
+        <span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span>
       </footer>
     `;
   }
@@ -676,7 +686,7 @@ function renderActionBar(state) {
         <button class="news-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button>
         <button class="news-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button>
         <button class="news-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length ? "" : "disabled"}>清空数据</button>
-        <span>当前 ${state.dataRows.length} 条 · 最多保留 ${MAX_STORED_RESULTS} 条</span>
+        <span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span>
       </footer>
     `;
   }
@@ -717,35 +727,79 @@ function renderPage(state, context) {
   `;
 }
 
+function normalizeStoredDataRow(row) {
+  const capturedAt = row.capturedAt || row.collectedAt || "";
+  // 旧版本的 row.time 实际含义不可靠，不能再回填为真正发布时间。
+  const publishedAtRaw = row.publishedAtRaw || row.publishedAt || "";
+  const publishedAt = row.publishedAtTimestamp
+    ? formatLocalCalendarDate(row.publishedAtTimestamp)
+    : normalizePublishedDate(row.publishedAt || publishedAtRaw, { referenceDate: capturedAt });
+  const collectedAt = capturedAt ? formatLocalCalendarDate(capturedAt) : "";
+  return {
+    ...row,
+    description: row.description || row.desc || "",
+    time: publishedAt,
+    publishedAt,
+    publishedAtRaw,
+    collectedAt,
+    capturedAt
+  };
+}
+
 function mergeDataRows(state, keyword, data, task) {
-  const incoming = (data?.results || []).map((result) => ({
-    id: `${keyword}|${result.url || result.title}`,
-    keyword,
-    title: result.title || "",
-    description: result.description || result.desc || "",
-    source: result.source || "",
-    time: result.time || "",
-    url: result.url || "",
-    capturedAt: data.capturedAt || new Date().toISOString()
-  }));
+  const capturedAt = data?.capturedAt || new Date().toISOString();
+  const collectedAt = formatLocalCalendarDate(capturedAt);
+  const incoming = (data?.results || []).map((result) => {
+    const publishedAtRaw = result.publishedAtRaw || result.publishedAt || "";
+    const publishedAtTimestamp = result.publishedAtTimestamp || "";
+    const publishedAt = publishedAtTimestamp
+      ? formatLocalCalendarDate(publishedAtTimestamp)
+      : normalizePublishedDate(publishedAtRaw, { referenceDate: capturedAt });
+    return {
+      id: `${keyword}|${result.url || result.title}`,
+      keyword,
+      title: result.title || "",
+      description: result.description || result.desc || "",
+      source: result.source || "",
+      time: publishedAt,
+      publishedAt,
+      publishedAtRaw,
+      publishedAtLabel: result.publishedAtLabel || "",
+      publishedAtTimestamp,
+      collectedAt,
+      url: result.url || "",
+      capturedAt
+    };
+  });
   const existing = new Map(state.dataRows.map((row) => [row.id, row]));
   let added = 0;
   for (const row of incoming) {
     if (!existing.has(row.id)) added += 1;
     existing.set(row.id, tagTaskDataRow({ ...existing.get(row.id), ...row }, task));
   }
-  state.dataRows = [...existing.values()]
-    .sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt)))
-    .slice(0, MAX_STORED_RESULTS);
+  state.dataRows = applyItemLimit(
+    [...existing.values()].sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))),
+    state.dataStorageLimit
+  );
   return added;
 }
 
 export async function mountGoogleNewsMonitor(container, context) {
+  const storageLimits = await loadGlobalStorageLimits().catch(() => ({
+    dataStorageLimit: 3000,
+    taskRecordsPerStatusLimit: 200
+  }));
   const saved = await loadSavedState().catch(() => null);
+  const savedConfig = migrateLegacyExecutionInterval(saved?.config, {
+    minKey: "keywordIntervalMinMs",
+    maxKey: "keywordIntervalMaxMs",
+    legacyMinMs: 100,
+    legacyMaxMs: 1000
+  });
   const state = {
     tab: "params",
     mode: "form",
-    config: saved?.config ? normalizeConfig(saved.config) : cloneSampleConfig(),
+    config: savedConfig ? normalizeConfig(savedConfig) : cloneSampleConfig(),
     jsonDraft: "",
     batchOpen: false,
     batchDraft: "",
@@ -758,13 +812,17 @@ export async function mountGoogleNewsMonitor(container, context) {
     notice: saved?.notice || (!isExtensionRuntime()
       ? { tone: "info", text: "当前是网页预览：运行会打开 Google 新闻搜索页；数据采集请在 Chrome 中加载扩展后测试。" }
       : null),
-    records: limitRecordsPerStatus(saved?.records),
+    dataStorageLimit: storageLimits.dataStorageLimit,
+    taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit,
+    records: limitRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit),
     dataRows: Array.isArray(saved?.dataRows)
-      ? saved.dataRows
-        .map((row) => ({ ...row, description: row.description || row.desc || "" }))
-        .slice(0, MAX_STORED_RESULTS)
+      ? applyItemLimit(
+        saved.dataRows.map(normalizeStoredDataRow),
+        storageLimits.dataStorageLimit
+      )
       : []
   };
+  saveState(state);
   let disposed = false;
   let activeRun = activeGoogleNewsRun;
 
@@ -845,7 +903,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       error: ""
     };
     state.records.unshift(record);
-    state.records = limitRecordsPerStatus(state.records);
+    state.records = limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit);
     return { record, startedAtMs };
   };
 
@@ -857,7 +915,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     record.resultCount = resultCount;
     record.error = error;
     record.duration = formatDuration(Date.now() - startedAtMs);
-    state.records = limitRecordsPerStatus(state.records);
+    state.records = limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit);
   };
 
   const startRun = async () => {
@@ -946,6 +1004,8 @@ export async function mountGoogleNewsMonitor(container, context) {
       return;
     }
 
+    await setFeatureRunning(FEATURE_KEY, true);
+    const taskTimeoutSeconds = await loadTaskTimeoutSeconds();
     let addedTotal = 0;
     let completedRounds = 0;
     try {
@@ -978,14 +1038,21 @@ export async function mountGoogleNewsMonitor(container, context) {
               const tab = await getOrCreateGoogleTab(null, true);
               if (!Number.isInteger(tab?.id)) throw new Error("无法创建用于 Google 新闻采集的标签页。");
               control.ownedTargetTabIds.add(tab.id);
-              const response = await sendMessage({
-                type: MESSAGE_CAPTURE_GOOGLE_NEWS,
-                options: {
-                  runId: captureRunId,
-                  tabId: tab.id,
-                  query: keyword,
-                  limit: state.config.limit,
-                  language: state.config.language
+              const response = await runWithTaskTimeout(() => sendMessage({
+                  type: MESSAGE_CAPTURE_GOOGLE_NEWS,
+                  options: {
+                    runId: captureRunId,
+                    tabId: tab.id,
+                    query: keyword,
+                    limit: state.config.limit,
+                    language: state.config.language
+                  }
+                }), {
+                timeoutSeconds: taskTimeoutSeconds,
+                onTimeout: async () => {
+                  await sendMessage({ type: MESSAGE_STOP_GOOGLE_NEWS, options: { runId: captureRunId } }).catch(() => null);
+                  await closePluginCreatedGoogleTab(tab.id);
+                  control.ownedTargetTabIds.delete(tab.id);
                 }
               });
               if (control.stopRequested) {
@@ -1061,6 +1128,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       }
       state.tab = "records";
     } finally {
+      await setFeatureRunning(FEATURE_KEY, false);
       if (activeGoogleNewsRun === control) {
         activeGoogleNewsRun = null;
       }
@@ -1098,11 +1166,12 @@ export async function mountGoogleNewsMonitor(container, context) {
     state.running = false;
     state.stopping = false;
     state.config = latest?.config ? normalizeConfig(latest.config) : state.config;
-    state.records = limitRecordsPerStatus(latest?.records || state.records);
+    state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
     state.dataRows = Array.isArray(latest?.dataRows)
-      ? latest.dataRows
-        .map((row) => ({ ...row, description: row.description || row.desc || "" }))
-        .slice(0, MAX_STORED_RESULTS)
+      ? applyItemLimit(
+        latest.dataRows.map(normalizeStoredDataRow),
+        state.dataStorageLimit
+      )
       : state.dataRows;
     state.notice = latest?.notice || state.notice;
     syncJsonDraft();

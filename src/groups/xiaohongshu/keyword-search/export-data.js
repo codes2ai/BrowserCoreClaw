@@ -7,7 +7,7 @@ export function buildXiaohongshuKeywordExportRows(dataRows) {
     noteContent: row.description || row.noteContent || row.desc || "",
     author: row.author || row.source || "",
     likes: row.likes || "",
-    publishedAt: row.time || "",
+    publishedAt: row.publishedAt || row.time || "",
     url: row.url || "",
     collectedAt: row.capturedAt || ""
   }));

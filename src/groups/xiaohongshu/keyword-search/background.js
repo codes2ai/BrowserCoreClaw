@@ -13,6 +13,7 @@ import { buildXiaohongshuSearchUrl } from "./search-url.js";
 
 const XIAOHONGSHU_URL_PATTERNS = ["https://www.xiaohongshu.com/*", "https://*.xiaohongshu.com/*"];
 const activeCaptures = new Map();
+let managedLoginTabId = null;
 
 function callChrome(callbackApi) {
   return new Promise((resolve, reject) => {
@@ -32,7 +33,33 @@ async function closePluginCreatedTab(tabId) {
   await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
 }
 
-async function findOrOpenXiaohongshuTab() {
+async function getManagedLoginTab(active = true) {
+  if (Number.isInteger(managedLoginTabId)) {
+    try {
+      const existing = await callChrome((done) => chrome.tabs.get(managedLoginTabId, done));
+      if (existing?.url && /(^https:\/\/)([^/]+\.)?xiaohongshu\.com\//i.test(existing.url)) {
+        return callChrome((done) => chrome.tabs.update(existing.id, { active }, done));
+      }
+    } catch {
+      // The login page may have been closed manually.
+    }
+  }
+
+  const tab = await callChrome((done) => chrome.tabs.create({
+    url: XIAOHONGSHU_HOME_URL,
+    active
+  }, done));
+  managedLoginTabId = Number.isInteger(tab?.id) ? tab.id : null;
+  return tab;
+}
+
+async function closeManagedLoginTab() {
+  const tabId = managedLoginTabId;
+  managedLoginTabId = null;
+  await closePluginCreatedTab(tabId);
+}
+
+async function findOrOpenXiaohongshuTab(options = {}) {
   const tabs = await callChrome((done) => chrome.tabs.query({ url: XIAOHONGSHU_URL_PATTERNS }, done));
   const tab = [...tabs].sort((first, second) => {
     if (first.active !== second.active) return first.active ? -1 : 1;
@@ -45,7 +72,7 @@ async function findOrOpenXiaohongshuTab() {
 
   const openedTab = await callChrome((done) => chrome.tabs.create({
     url: XIAOHONGSHU_HOME_URL,
-    active: true
+    active: options.active !== false
   }, done));
   return { tab: openedTab, opened: true };
 }
@@ -66,18 +93,6 @@ async function getXiaohongshuTab(preferredTabId = null, isolated = false) {
   }
   const { tab } = await findOrOpenXiaohongshuTab();
   return tab;
-}
-
-async function activateXiaohongshuTab() {
-  const { tab } = await findOrOpenXiaohongshuTab();
-  if (!tab?.id) {
-    throw new Error("无法打开小红书登录页面。");
-  }
-  const activeTab = await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
-  if (Number.isInteger(activeTab.windowId)) {
-    await callChrome((done) => chrome.windows.update(activeTab.windowId, { focused: true }, done));
-  }
-  return activeTab;
 }
 
 async function inspectLoginState(tabId) {
@@ -143,26 +158,41 @@ async function inspectLoginState(tabId) {
 }
 
 export async function checkXiaohongshuLogin() {
-  const { tab, opened } = await findOrOpenXiaohongshuTab();
+  // 每次检测都使用专用临时页，绝不复用正在被采集任务控制的小红书页。
+  // 这样三个小红书功能可以同时运行，登录检测也不会抢占其它任务的调试连接。
+  const tab = await callChrome((done) => chrome.tabs.create({
+    url: XIAOHONGSHU_HOME_URL,
+    active: false
+  }, done));
   if (!tab?.id) {
     throw new Error("无法找到用于检测的小红书标签页。");
   }
-  const login = await inspectLoginState(tab.id);
-  const autoClosed = opened && login.state === "logged_in";
-  if (autoClosed) await closePluginCreatedTab(tab.id);
-  return {
-    ok: true,
-    tabId: tab.id,
-    opened,
-    autoClosed,
-    loggedIn: login.state === "logged_in",
-    state: login.state,
-    reason: login.reason
-  };
+  try {
+    const login = await inspectLoginState(tab.id);
+    if (login.state === "logged_in") await closeManagedLoginTab();
+    return {
+      ok: true,
+      tabId: tab.id,
+      opened: true,
+      autoClosed: true,
+      loggedIn: login.state === "logged_in",
+      state: login.state,
+      reason: login.reason
+    };
+  } finally {
+    await closePluginCreatedTab(tab.id);
+  }
 }
 
 export async function openXiaohongshuLogin() {
-  const tab = await activateXiaohongshuTab();
+  // 登录入口只复用本功能自己创建的登录页，不接管任何采集任务标签页。
+  const tab = await getManagedLoginTab(true);
+  if (!Number.isInteger(tab?.id)) {
+    throw new Error("无法打开小红书登录页面。");
+  }
+  if (Number.isInteger(tab.windowId)) {
+    await callChrome((done) => chrome.windows.update(tab.windowId, { focused: true }, done));
+  }
   return { ok: true, tabId: tab.id };
 }
 
