@@ -1098,6 +1098,16 @@
   color: #27704d;
 }
 
+.news-table-status.empty {
+  background: #eef2f6;
+  color: #526071;
+}
+
+.news-table-status.risk {
+  background: #fff0e8;
+  color: #b34d1f;
+}
+
 .news-table-status.error {
   background: #fff0f0;
   color: #ae4040;

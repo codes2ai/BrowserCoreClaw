@@ -167,7 +167,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch((error) => {
       sendResponse({
         ok: false,
-        error: error.message || String(error)
+        error: error.message || String(error),
+        errorCode: error.code || ""
       });
     });
   return true;

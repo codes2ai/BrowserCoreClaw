@@ -17,18 +17,32 @@ export function createTaskTimeoutError(timeoutSeconds) {
 export function runWithTaskTimeout(task, options = {}) {
   const timeoutSeconds = Math.max(0.001, Number(options.timeoutSeconds) || 120);
   const timeoutMilliseconds = Math.max(1, Math.round(timeoutSeconds * 1000));
+  const isPaused = typeof options.isPaused === "function" ? options.isPaused : () => false;
   const taskPromise = Promise.resolve().then(() => (
     typeof task === "function" ? task() : task
   ));
 
   let timer = null;
+  let elapsedMilliseconds = 0;
+  let lastCheckedAt = Date.now();
   const timeoutPromise = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      Promise.resolve()
-        .then(() => options.onTimeout?.())
-        .catch(() => {});
-      reject(createTaskTimeoutError(timeoutSeconds));
-    }, timeoutMilliseconds);
+    const checkTimeout = () => {
+      const now = Date.now();
+      if (!isPaused()) {
+        elapsedMilliseconds += now - lastCheckedAt;
+      }
+      lastCheckedAt = now;
+      if (elapsedMilliseconds >= timeoutMilliseconds) {
+        Promise.resolve()
+          .then(() => options.onTimeout?.())
+          .catch(() => {});
+        reject(createTaskTimeoutError(timeoutSeconds));
+        return;
+      }
+      const remainingMilliseconds = timeoutMilliseconds - elapsedMilliseconds;
+      timer = setTimeout(checkTimeout, Math.min(250, Math.max(1, remainingMilliseconds)));
+    };
+    timer = setTimeout(checkTimeout, Math.min(250, timeoutMilliseconds));
   });
 
   return Promise.race([taskPromise, timeoutPromise]).finally(() => {

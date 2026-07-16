@@ -31,6 +31,12 @@ import {
   DEFAULT_EXECUTION_INTERVAL_MIN_MS,
   migrateLegacyExecutionInterval
 } from "../../../shared/execution-interval.js";
+import {
+  clampInputListPage,
+  pageForInputIndex,
+  paginateInputList,
+  renderInputListPagination
+} from "../../../shared/input-list-pagination.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileV1";
 const FEATURE_KEY = "xiaohongshu/profile-notes";
@@ -261,8 +267,8 @@ function renderTabs(state) {
   `).join("");
 }
 
-function renderProfileRows(state) {
-  return state.profileUrls.map((profileUrl, index) => `
+function renderProfileRows(state, pagination) {
+  return pagination.items.map(({ value: profileUrl, index }) => `
     <div class="xhs-keyword-row">
       <span class="xhs-row-index">${index + 1}</span>
       <label class="xhs-keyword-input">
@@ -330,6 +336,7 @@ function renderRunOptions(state) {
 }
 
 function renderParameters(state) {
+  const pagination = paginateInputList(state.profileUrls, state.inputListPage);
   return `
     <section class="xhs-parameter-card">
       <div class="xhs-field-heading">
@@ -339,7 +346,8 @@ function renderParameters(state) {
         </div>
         <span>${state.profileUrls.filter(Boolean).length} 个主页</span>
       </div>
-      <div class="xhs-keyword-list xhs-profile-list">${renderProfileRows(state)}</div>
+      <div class="xhs-keyword-list xhs-profile-list">${renderProfileRows(state, pagination)}</div>
+      ${renderInputListPagination(pagination, { itemLabel: "个主页" })}
       <div class="xhs-inline-actions">
         <button class="xhs-secondary-button emphasized" type="button" data-action="add-profile" ${state.running ? "disabled" : ""}>＋ 添加主页</button>
         <button class="xhs-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button>
@@ -516,6 +524,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
   const state = {
     tab: "params",
     profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS],
+    inputListPage: 1,
     dataStorageLimit: storageLimits.dataStorageLimit,
     taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit,
     records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit),
@@ -757,14 +766,16 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       case "run": startRun().catch((error) => { state.running = false; state.stopping = false; activeRun = null; activeProfileRun = null; state.notice = { tone: "error", text: error.message || String(error) }; render(); }); break;
       case "stop": stopRun().catch((error) => { state.notice = { tone: "error", text: `停止任务失败：${error.message || String(error)}` }; render(); }); break;
       case "toggle-options": state.optionsOpen = !state.optionsOpen; render(); break;
-      case "add-profile": state.profileUrls.push(""); render(); break;
-      case "remove-profile": state.profileUrls.splice(Number(button.dataset.index), 1); saveState(state); render(); break;
+      case "set-input-list-page": state.inputListPage = clampInputListPage(button.dataset.page, state.profileUrls); render(); break;
+      case "add-profile": state.profileUrls.push(""); state.inputListPage = pageForInputIndex(state.profileUrls.length - 1); render(); requestAnimationFrame(() => container.querySelector(`[data-profile-index="${state.profileUrls.length - 1}"]`)?.focus()); break;
+      case "remove-profile": state.profileUrls.splice(Number(button.dataset.index), 1); state.inputListPage = clampInputListPage(state.inputListPage, state.profileUrls); saveState(state); render(); break;
       case "open-batch": state.batchDraft = state.profileUrls.filter(Boolean).join("\n"); state.guideOpen = false; state.batchOpen = true; render(); requestAnimationFrame(() => container.querySelector("[data-batch-input]")?.focus()); break;
       case "close-batch": state.batchOpen = false; render(); break;
       case "apply-batch": {
         const profileUrls = uniqueUrls(state.batchDraft.split(/[\n,，;；]+/));
         if (!profileUrls.length) { state.notice = { tone: "error", text: "批量列表中至少需要一个主页链接。" }; render(); break; }
         state.profileUrls = profileUrls;
+        state.inputListPage = 1;
         state.batchOpen = false;
         state.notice = { tone: "success", text: `已应用 ${profileUrls.length} 个博主主页链接。` };
         saveState(state);
@@ -781,6 +792,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       case "export-csv": downloadXiaohongshuProfileData(state.dataRows, "csv"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` }; render(); break;
       case "reset":
         state.profileUrls = [...DEFAULT_PROFILE_URLS];
+        state.inputListPage = 1;
         state.limit = DEFAULT_OPTIONS.limit;
         state.concurrency = DEFAULT_OPTIONS.concurrency;
         state.intervalMinMs = DEFAULT_OPTIONS.intervalMinMs;

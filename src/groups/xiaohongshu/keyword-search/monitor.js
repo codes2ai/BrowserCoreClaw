@@ -36,6 +36,12 @@ import {
   DEFAULT_EXECUTION_INTERVAL_MIN_MS,
   migrateLegacyExecutionInterval
 } from "../../../shared/execution-interval.js";
+import {
+  clampInputListPage,
+  pageForInputIndex,
+  paginateInputList,
+  renderInputListPagination
+} from "../../../shared/input-list-pagination.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuKeywordV1";
 const FEATURE_KEY = "xiaohongshu/keyword-search";
@@ -308,8 +314,8 @@ function renderTabs(state) {
   `).join("");
 }
 
-function renderKeywordRows(state) {
-  return state.config.keywords.map((keyword, index) => `
+function renderKeywordRows(state, pagination) {
+  return pagination.items.map(({ value: keyword, index }) => `
     <div class="xhs-keyword-row">
       <span class="xhs-row-index" aria-hidden="true">${index + 1}</span>
       <label class="xhs-keyword-input">
@@ -330,6 +336,7 @@ function renderKeywordRows(state) {
 }
 
 function renderFormMode(state) {
+  const pagination = paginateInputList(state.config.keywords, state.inputListPage);
   return `
     <div class="xhs-field-heading">
       <div>
@@ -338,7 +345,8 @@ function renderFormMode(state) {
       </div>
       <span>${state.config.keywords.length} 个关键词</span>
     </div>
-    <div class="xhs-keyword-list">${renderKeywordRows(state)}</div>
+    <div class="xhs-keyword-list">${renderKeywordRows(state, pagination)}</div>
+    ${renderInputListPagination(pagination, { itemLabel: "个关键词" })}
     <div class="xhs-inline-actions">
       <button class="xhs-secondary-button emphasized" type="button" data-action="add-keyword" ${state.running ? "disabled" : ""}>添加关键词</button>
       <button class="xhs-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button>
@@ -766,6 +774,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     jsonDraft: "",
     batchOpen: false,
     batchDraft: "",
+    inputListPage: 1,
     guideOpen: false,
     taskDetailRecordId: "",
     optionsOpen: false,
@@ -838,6 +847,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   const applyJsonDraft = () => {
     try {
       state.config = normalizeConfig(JSON.parse(state.jsonDraft));
+      state.inputListPage = 1;
       syncJsonDraft();
       state.notice = { tone: "success", text: "JSON 参数已校验并同步到表单。" };
       saveState(state);
@@ -1112,14 +1122,21 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       render();
       return;
     }
+    if (action === "set-input-list-page") {
+      state.inputListPage = clampInputListPage(button.dataset.page, state.config.keywords);
+      render();
+      return;
+    }
     if (action === "add-keyword") {
       state.config.keywords.push("");
+      state.inputListPage = pageForInputIndex(state.config.keywords.length - 1);
       render();
       container.querySelector(`[data-keyword-index="${state.config.keywords.length - 1}"]`)?.focus();
       return;
     }
     if (action === "remove-keyword") {
       state.config.keywords.splice(Number(button.dataset.index), 1);
+      state.inputListPage = clampInputListPage(state.inputListPage, state.config.keywords);
       saveState(state);
       render();
       return;
@@ -1156,6 +1173,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
         requestAnimationFrame(() => container.querySelector("[data-batch-input]")?.focus());
       } else {
         state.config.keywords = keywords;
+        state.inputListPage = 1;
         state.batchOpen = false;
         state.notice = { tone: "success", text: `已应用 ${keywords.length} 个关键词。` };
         syncJsonDraft();
@@ -1202,6 +1220,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     }
     if (action === "reset") {
       state.config = cloneSampleConfig();
+      state.inputListPage = 1;
       state.optionsOpen = false;
       state.notice = { tone: "success", text: "已还原示例输入。" };
       syncJsonDraft();

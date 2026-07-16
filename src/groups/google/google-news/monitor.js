@@ -1,4 +1,8 @@
-import { MESSAGE_CAPTURE_GOOGLE_NEWS, MESSAGE_STOP_GOOGLE_NEWS } from "./constants.js";
+import {
+  MESSAGE_CAPTURE_GOOGLE_NEWS,
+  MESSAGE_GOOGLE_NEWS_CAPTURE_STATUS,
+  MESSAGE_STOP_GOOGLE_NEWS
+} from "./constants.js";
 import { downloadGoogleNewsData } from "./export-data.js";
 import { buildGoogleNewsSearchUrl } from "./search-url.js";
 import {
@@ -15,7 +19,7 @@ import {
 } from "../../../shared/concurrent-task-pool.js";
 import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
-import { formatLocalCalendarDate, normalizePublishedDate } from "../../../shared/date-normalizer.js";
+import { formatLocalDateTime, normalizePublishedDateTime } from "../../../shared/date-normalizer.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -28,6 +32,12 @@ import {
   DEFAULT_EXECUTION_INTERVAL_MIN_MS,
   migrateLegacyExecutionInterval
 } from "../../../shared/execution-interval.js";
+import {
+  clampInputListPage,
+  pageForInputIndex,
+  paginateInputList,
+  renderInputListPagination
+} from "../../../shared/input-list-pagination.js";
 
 const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
 const FEATURE_KEY = "google/google-news";
@@ -35,6 +45,9 @@ const ALL_RECORD_FILTER = "__all__";
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
   success: { label: "完成", tone: "success" },
+  empty: { label: "无数据", tone: "empty" },
+  verification: { label: "等待验证", tone: "risk" },
+  risk: { label: "风控", tone: "risk" },
   partial: { label: "部分完成", tone: "warning" },
   error: { label: "失败", tone: "error" },
   stopped: { label: "已停止", tone: "stopped" },
@@ -56,6 +69,8 @@ const SAMPLE_CONFIG = Object.freeze({
 // 让任务脱离某次页面挂载继续执行，并在重新打开功能时恢复控制入口。
 let activeGoogleNewsRun = null;
 const GOOGLE_NEWS_RUN_FINISHED_EVENT = "browser-core-claw-google-news-run-finished";
+const GOOGLE_NEWS_RUN_STATUS_EVENT = "browser-core-claw-google-news-run-status";
+let googleNewsCaptureStatusListenerInstalled = false;
 
 function cloneSampleConfig() {
   return { ...SAMPLE_CONFIG, keywords: [...SAMPLE_CONFIG.keywords] };
@@ -156,12 +171,18 @@ export function getRecordStatusKey(record) {
   }
   const status = String(record?.status || "");
   if (/停止/.test(status)) return "stopped";
+  if (/等待验证|验证通过/.test(status)) return "verification";
+  if (/风控|人机验证|异常流量/.test(status)) return "risk";
+  if (/无数据/.test(status)) return "empty";
   if (/部分/.test(status)) return "partial";
   if (/失败|打开失败/.test(status)) return "error";
   if (/完成/.test(status)) return "success";
   if (/打开搜索页/.test(status)) return "preview";
   const toneMap = {
     success: "success",
+    empty: "empty",
+    verification: "verification",
+    risk: "risk",
     warning: "partial",
     error: "error",
     stopped: "stopped",
@@ -199,9 +220,14 @@ function wait(ms) {
 
 async function waitWhileRunning(ms, control) {
   const deadline = Date.now() + ms;
-  while (!control.stopRequested && Date.now() < deadline) {
+  while (!control.stopRequested && !control.riskControlTriggered && Date.now() < deadline) {
     await wait(Math.min(100, deadline - Date.now()));
   }
+}
+
+function isGoogleNewsRiskControlError(error) {
+  return error?.code === "GOOGLE_NEWS_RISK_CONTROL"
+    || /Google[^。]*(?:人机验证|异常流量|风控)|\/sorry\//i.test(error?.message || String(error || ""));
 }
 
 export function normalizeKeywordIntervalRange(config) {
@@ -298,6 +324,20 @@ function sendMessage(message) {
   return callChrome((done) => chrome.runtime.sendMessage(message, done));
 }
 
+function ensureGoogleNewsCaptureStatusListener() {
+  if (googleNewsCaptureStatusListenerInstalled || !isExtensionRuntime()) return;
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== MESSAGE_GOOGLE_NEWS_CAPTURE_STATUS) return false;
+    const control = activeGoogleNewsRun;
+    if (!control || message.options?.runId && !control.activeCaptureRunIds.has(message.options.runId)) {
+      return false;
+    }
+    Promise.resolve(control.handleCaptureStatus?.(message.options || {})).catch(() => {});
+    return false;
+  });
+  googleNewsCaptureStatusListenerInstalled = true;
+}
+
 async function loadSavedState() {
   if (!isExtensionRuntime() || !chrome.storage?.local) {
     return null;
@@ -336,8 +376,8 @@ function renderTabs(state) {
   `).join("");
 }
 
-function renderKeywordRows(state) {
-  return state.config.keywords.map((keyword, index) => `
+function renderKeywordRows(state, pagination) {
+  return pagination.items.map(({ value: keyword, index }) => `
     <div class="news-keyword-row">
       <span class="news-row-index" aria-hidden="true">${index + 1}</span>
       <label class="news-keyword-input">
@@ -358,6 +398,7 @@ function renderKeywordRows(state) {
 }
 
 function renderFormMode(state) {
+  const pagination = paginateInputList(state.config.keywords, state.inputListPage);
   return `
     <div class="news-field-heading">
       <div>
@@ -366,7 +407,8 @@ function renderFormMode(state) {
       </div>
       <span>${state.config.keywords.length} 个关键词</span>
     </div>
-    <div class="news-keyword-list">${renderKeywordRows(state)}</div>
+    <div class="news-keyword-list">${renderKeywordRows(state, pagination)}</div>
+    ${renderInputListPagination(pagination, { itemLabel: "个关键词" })}
     <div class="news-inline-actions">
       <button class="news-secondary-button emphasized" type="button" data-action="add-keyword" ${state.running ? "disabled" : ""}>添加关键词</button>
       <button class="news-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button>
@@ -599,7 +641,7 @@ function renderData(state) {
   return `
     <section class="news-content-card news-table-page">
       <div class="news-panel-head">
-        <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；发布时间来自新闻卡片，采集时间为任务实际获取日期。</p></div>
+        <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；发布时间和采集时间统一为 YYYY-MM-DD HH:mm:ss。</p></div>
       </div>
       <div class="news-table-shell data" tabindex="0" aria-label="可滚动的 Google 新闻采集数据表格">
         <table class="news-table news-data-table">
@@ -668,7 +710,7 @@ function renderActionBar(state) {
       <footer class="news-action-bar">
         ${renderRunButton(state)}
         <button class="news-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原示例输入</button>
-        <span>${state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : isExtensionRuntime() ? "无需预先打开 Google 页面，扩展会自动准备标签页。" : "网页预览仅打开搜索页；扩展环境才会采集数据。"}</span>
+        <span>${state.verificationPending ? "等待你在 Google 页面完成人机验证；完成后任务会自动恢复。" : state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : isExtensionRuntime() ? "无需预先打开 Google 页面，扩展会自动准备标签页。" : "网页预览仅打开搜索页；扩展环境才会采集数据。"}</span>
       </footer>
     `;
   }
@@ -732,9 +774,9 @@ function normalizeStoredDataRow(row) {
   // 旧版本的 row.time 实际含义不可靠，不能再回填为真正发布时间。
   const publishedAtRaw = row.publishedAtRaw || row.publishedAt || "";
   const publishedAt = row.publishedAtTimestamp
-    ? formatLocalCalendarDate(row.publishedAtTimestamp)
-    : normalizePublishedDate(row.publishedAt || publishedAtRaw, { referenceDate: capturedAt });
-  const collectedAt = capturedAt ? formatLocalCalendarDate(capturedAt) : "";
+    ? formatLocalDateTime(row.publishedAtTimestamp)
+    : normalizePublishedDateTime(publishedAtRaw, { referenceDate: capturedAt });
+  const collectedAt = capturedAt ? formatLocalDateTime(capturedAt) : "";
   return {
     ...row,
     description: row.description || row.desc || "",
@@ -748,13 +790,13 @@ function normalizeStoredDataRow(row) {
 
 function mergeDataRows(state, keyword, data, task) {
   const capturedAt = data?.capturedAt || new Date().toISOString();
-  const collectedAt = formatLocalCalendarDate(capturedAt);
+  const collectedAt = formatLocalDateTime(capturedAt);
   const incoming = (data?.results || []).map((result) => {
     const publishedAtRaw = result.publishedAtRaw || result.publishedAt || "";
     const publishedAtTimestamp = result.publishedAtTimestamp || "";
     const publishedAt = publishedAtTimestamp
-      ? formatLocalCalendarDate(publishedAtTimestamp)
-      : normalizePublishedDate(publishedAtRaw, { referenceDate: capturedAt });
+      ? formatLocalDateTime(publishedAtTimestamp)
+      : normalizePublishedDateTime(publishedAtRaw, { referenceDate: capturedAt });
     return {
       id: `${keyword}|${result.url || result.title}`,
       keyword,
@@ -785,6 +827,7 @@ function mergeDataRows(state, keyword, data, task) {
 }
 
 export async function mountGoogleNewsMonitor(container, context) {
+  ensureGoogleNewsCaptureStatusListener();
   const storageLimits = await loadGlobalStorageLimits().catch(() => ({
     dataStorageLimit: 3000,
     taskRecordsPerStatusLimit: 200
@@ -803,11 +846,13 @@ export async function mountGoogleNewsMonitor(container, context) {
     jsonDraft: "",
     batchOpen: false,
     batchDraft: "",
+    inputListPage: 1,
     guideOpen: false,
     taskDetailRecordId: "",
     optionsOpen: false,
     running: Boolean(activeGoogleNewsRun),
     stopping: Boolean(activeGoogleNewsRun?.stopRequested),
+    verificationPending: Boolean(activeGoogleNewsRun?.verificationPending),
     recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
     notice: saved?.notice || (!isExtensionRuntime()
       ? { tone: "info", text: "当前是网页预览：运行会打开 Google 新闻搜索页；数据采集请在 Chrome 中加载扩展后测试。" }
@@ -877,6 +922,7 @@ export async function mountGoogleNewsMonitor(container, context) {
   const applyJsonDraft = () => {
     try {
       state.config = normalizeConfig(JSON.parse(state.jsonDraft));
+      state.inputListPage = 1;
       syncJsonDraft();
       state.notice = { tone: "success", text: "JSON 参数已校验并同步到表单。" };
       saveState(state);
@@ -933,6 +979,12 @@ export async function mountGoogleNewsMonitor(container, context) {
     const control = {
       runId: `GN-${String(runStartedAtMs).slice(-8)}`,
       stopRequested: false,
+      riskControlTriggered: false,
+      riskCleanupPromise: null,
+      verificationPending: false,
+      verificationTabId: null,
+      verificationRunId: "",
+      verificationCycle: 0,
       activeCaptureRunIds: new Set(),
       ownedTargetTabIds: new Set()
     };
@@ -1007,92 +1059,236 @@ export async function mountGoogleNewsMonitor(container, context) {
     await setFeatureRunning(FEATURE_KEY, true);
     const taskTimeoutSeconds = await loadTaskTimeoutSeconds();
     let addedTotal = 0;
+    let emptyTotal = 0;
+    let riskTotal = 0;
     let completedRounds = 0;
+    const haltForRiskControl = async (verificationTabId, verificationRunId) => {
+      control.riskControlTriggered = true;
+      control.verificationPending = true;
+      control.verificationTabId = Number(verificationTabId);
+      control.verificationRunId = String(verificationRunId || "");
+      if (!control.riskCleanupPromise) {
+        control.riskCleanupPromise = (async () => {
+          await Promise.all([...control.activeCaptureRunIds]
+            .filter((runId) => runId !== control.verificationRunId)
+            .map((runId) => (
+              sendMessage({ type: MESSAGE_STOP_GOOGLE_NEWS, options: { runId } }).catch(() => null)
+            )));
+          const ownedTabIds = [...control.ownedTargetTabIds]
+            .filter((tabId) => tabId !== control.verificationTabId);
+          await Promise.all(ownedTabIds.map((tabId) => closePluginCreatedGoogleTab(tabId)));
+          ownedTabIds.forEach((tabId) => control.ownedTargetTabIds.delete(tabId));
+        })();
+      }
+      await control.riskCleanupPromise;
+    };
+    const abortForUnexpectedRiskControl = async () => {
+      control.riskControlTriggered = true;
+      await Promise.all([...control.activeCaptureRunIds].map((runId) => (
+        sendMessage({ type: MESSAGE_STOP_GOOGLE_NEWS, options: { runId } }).catch(() => null)
+      )));
+      const ownedTabIds = [...control.ownedTargetTabIds];
+      await Promise.all(ownedTabIds.map((tabId) => closePluginCreatedGoogleTab(tabId)));
+      control.ownedTargetTabIds.clear();
+    };
+    control.handleCaptureStatus = async (captureStatus) => {
+      if (!captureStatus?.runId || !control.activeCaptureRunIds.has(captureStatus.runId)) return;
+      const record = state.records.find((item) => item.id === captureStatus.runId);
+      if (captureStatus.status === "waiting_verification") {
+        await haltForRiskControl(captureStatus.tabId, captureStatus.runId);
+        state.verificationPending = true;
+        if (record) {
+          record.status = RECORD_STATUS_META.verification.label;
+          record.statusKey = "verification";
+          record.tone = RECORD_STATUS_META.verification.tone;
+          record.error = "Google 检测到异常流量，正在等待人工完成 reCAPTCHA 验证。";
+        }
+        state.notice = {
+          tone: "error",
+          text: "Google 已触发人机验证：其他 Google 关键词已暂停并关闭，只保留当前验证页。请手动完成验证，插件会自动检测并继续任务。"
+        };
+        state.tab = "records";
+      } else if (captureStatus.status === "verification_passed") {
+        state.verificationPending = true;
+        if (record) record.status = "验证通过，冷却中";
+        state.notice = {
+          tone: "success",
+          text: `Google 验证已通过，正在冷却 ${Math.round((Number(captureStatus.cooldownMs) || 0) / 1000)} 秒，然后自动恢复未完成关键词。`
+        };
+      } else if (captureStatus.status === "capture_resumed") {
+        control.verificationPending = false;
+        control.riskControlTriggered = false;
+        control.riskCleanupPromise = null;
+        control.verificationTabId = null;
+        control.verificationRunId = "";
+        control.verificationCycle += 1;
+        state.verificationPending = false;
+        if (record) {
+          record.status = RECORD_STATUS_META.running.label;
+          record.statusKey = "running";
+          record.tone = RECORD_STATUS_META.running.tone;
+          record.error = "";
+        }
+        state.notice = { tone: "info", text: "Google 验证已解除，正在恢复当前任务和未完成关键词…" };
+      } else {
+        return;
+      }
+      saveState(state);
+      render();
+      globalThis.dispatchEvent?.(new Event(GOOGLE_NEWS_RUN_STATUS_EVENT));
+    };
     try {
       do {
         const round = completedRounds + 1;
         let roundFailed = 0;
+        let roundEmpty = 0;
+        let roundRisk = 0;
         let roundAdded = 0;
-        await runConcurrentTasks(keywords, {
-          concurrency: state.config.concurrency,
-          shouldStop: () => control.stopRequested,
-          worker: async (keyword, index) => {
-            if (index >= state.config.concurrency) {
-              await waitForKeywordInterval(state.config, control, {
-                onWait: (intervalMs) => {
-                  state.notice = { tone: "info", text: `正在准备后续关键词，随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}）…` };
-                  saveState(state);
-                  render();
-                }
-              });
-            }
-            if (control.stopRequested) return;
-
-            const keywordRecord = createKeywordRecord(control, keyword, round, index);
-            const captureRunId = keywordRecord.record.id;
-            control.activeCaptureRunIds.add(captureRunId);
-            state.notice = { tone: "info", text: `第 ${round} 轮，正在并发搜索 ${control.activeCaptureRunIds.size}/${state.config.concurrency} 个关键词…` };
-            saveState(state);
-            render();
-            try {
-              const tab = await getOrCreateGoogleTab(null, true);
-              if (!Number.isInteger(tab?.id)) throw new Error("无法创建用于 Google 新闻采集的标签页。");
-              control.ownedTargetTabIds.add(tab.id);
-              const response = await runWithTaskTimeout(() => sendMessage({
-                  type: MESSAGE_CAPTURE_GOOGLE_NEWS,
-                  options: {
-                    runId: captureRunId,
-                    tabId: tab.id,
-                    query: keyword,
-                    limit: state.config.limit,
-                    language: state.config.language
+        const settledKeywordIndexes = new Set();
+        let pendingKeywordEntries = keywords.map((keyword, index) => ({ keyword, index }));
+        while (pendingKeywordEntries.length && !control.stopRequested && !control.riskControlTriggered) {
+          const verificationCycleBefore = control.verificationCycle;
+          await runConcurrentTasks(pendingKeywordEntries, {
+            concurrency: state.config.concurrency,
+            shouldStop: () => control.stopRequested || control.riskControlTriggered,
+            worker: async (entry, queueIndex) => {
+              const { keyword, index } = entry;
+              if (queueIndex >= state.config.concurrency) {
+                await waitForKeywordInterval(state.config, control, {
+                  onWait: (intervalMs) => {
+                    state.notice = { tone: "info", text: `正在准备后续关键词，随机等待 ${intervalMs} ms（范围 ${formatKeywordIntervalRange(state.config)}）…` };
+                    saveState(state);
+                    render();
                   }
-                }), {
-                timeoutSeconds: taskTimeoutSeconds,
-                onTimeout: async () => {
-                  await sendMessage({ type: MESSAGE_STOP_GOOGLE_NEWS, options: { runId: captureRunId } }).catch(() => null);
-                  await closePluginCreatedGoogleTab(tab.id);
-                  control.ownedTargetTabIds.delete(tab.id);
-                }
-              });
-              if (control.stopRequested) {
-                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
-                return;
+                });
               }
-              if (!response?.ok) throw new Error(response?.error || "采集失败");
-              await closePluginCreatedGoogleTab(tab.id);
-              control.ownedTargetTabIds.delete(tab.id);
-              const added = mergeDataRows(state, keyword, response.data, {
-                runId: control.runId,
-                recordId: keywordRecord.record.id
-              });
-              roundAdded += added;
-              addedTotal += added;
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", added);
-            } catch (error) {
-              if (control.stopRequested) finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
-              else {
-                const errorText = error.message || String(error);
-                roundFailed += 1;
-                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
-                state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
-              }
-            } finally {
-              control.activeCaptureRunIds.delete(captureRunId);
+              if (control.stopRequested || control.riskControlTriggered) return;
+
+              const keywordRecord = createKeywordRecord(control, keyword, round, index);
+              const captureRunId = keywordRecord.record.id;
+              control.activeCaptureRunIds.add(captureRunId);
+              state.notice = { tone: "info", text: `第 ${round} 轮，正在并发搜索 ${control.activeCaptureRunIds.size}/${state.config.concurrency} 个关键词…` };
               saveState(state);
               render();
+              let tab = null;
+              try {
+                tab = await getOrCreateGoogleTab(null, true);
+                if (!Number.isInteger(tab?.id)) throw new Error("无法创建用于 Google 新闻采集的标签页。");
+                control.ownedTargetTabIds.add(tab.id);
+                const response = await runWithTaskTimeout(() => sendMessage({
+                    type: MESSAGE_CAPTURE_GOOGLE_NEWS,
+                    options: {
+                      runId: captureRunId,
+                      tabId: tab.id,
+                      query: keyword,
+                      limit: state.config.limit,
+                      language: state.config.language
+                    }
+                  }), {
+                  timeoutSeconds: taskTimeoutSeconds,
+                  isPaused: () => control.verificationPending && control.verificationRunId === captureRunId,
+                  onTimeout: async () => {
+                    await sendMessage({ type: MESSAGE_STOP_GOOGLE_NEWS, options: { runId: captureRunId } }).catch(() => null);
+                    await closePluginCreatedGoogleTab(tab.id);
+                    control.ownedTargetTabIds.delete(tab.id);
+                  }
+                });
+                if (control.stopRequested) {
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
+                  return;
+                }
+                if (!response?.ok) {
+                  const responseError = new Error(response?.error || "采集失败");
+                  responseError.code = response?.errorCode || "";
+                  throw responseError;
+                }
+                await closePluginCreatedGoogleTab(tab.id);
+                control.ownedTargetTabIds.delete(tab.id);
+                if (response.empty) {
+                  roundEmpty += 1;
+                  emptyTotal += 1;
+                  settledKeywordIndexes.add(index);
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "empty", 0);
+                  return;
+                }
+                const added = mergeDataRows(state, keyword, response.data, {
+                  runId: control.runId,
+                  recordId: keywordRecord.record.id
+                });
+                roundAdded += added;
+                addedTotal += added;
+                settledKeywordIndexes.add(index);
+                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", added);
+              } catch (error) {
+                if (control.stopRequested) {
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
+                } else if (control.verificationPending && captureRunId !== control.verificationRunId) {
+                  state.records = state.records.filter((item) => item !== keywordRecord.record);
+                } else if (control.verificationPending && captureRunId === control.verificationRunId) {
+                  const errorText = error.message || String(error);
+                  control.verificationPending = false;
+                  control.riskControlTriggered = false;
+                  control.riskCleanupPromise = null;
+                  control.verificationTabId = null;
+                  control.verificationRunId = "";
+                  state.verificationPending = false;
+                  roundFailed += 1;
+                  settledKeywordIndexes.add(index);
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                  state.notice = { tone: "error", text: `Google 验证流程中断：${errorText}` };
+                } else if (isGoogleNewsRiskControlError(error)) {
+                  const errorText = error.message || String(error);
+                  roundRisk += 1;
+                  riskTotal += 1;
+                  settledKeywordIndexes.add(index);
+                  await abortForUnexpectedRiskControl();
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "risk", 0, errorText);
+                  state.notice = {
+                    tone: "error",
+                    text: "Google 风控状态通知异常，已停止本批任务并关闭采集标签页。请重新加载扩展后再试。"
+                  };
+                } else {
+                  const errorText = error.message || String(error);
+                  roundFailed += 1;
+                  settledKeywordIndexes.add(index);
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                  state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
+                }
+              } finally {
+                control.activeCaptureRunIds.delete(captureRunId);
+                saveState(state);
+                render();
+              }
             }
-          }
-        });
+          });
+
+          const nextPendingEntries = keywords
+            .map((keyword, index) => ({ keyword, index }))
+            .filter((entry) => !settledKeywordIndexes.has(entry.index));
+          if (!nextPendingEntries.length || control.stopRequested || control.riskControlTriggered) break;
+          if (control.verificationCycle <= verificationCycleBefore) break;
+          pendingKeywordEntries = nextPendingEntries;
+          state.notice = { tone: "info", text: `Google 验证已解除，正在恢复 ${pendingKeywordEntries.length} 个未完成关键词…` };
+          saveState(state);
+          render();
+        }
 
         saveState(state);
         if (control.stopRequested) break;
+        if (control.riskControlTriggered) {
+          state.notice = {
+            tone: "error",
+            text: `本轮触发 Google 风控 ${roundRisk} 个任务，已停止剩余关键词并关闭插件创建的采集标签页；本次已新增 ${addedTotal} 条数据。请稍后再运行。`
+          };
+          state.tab = "records";
+          break;
+        }
         completedRounds = round;
 
         if (!state.config.polling) {
           state.notice = {
-            tone: roundFailed ? "error" : "success",
-            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词。`
+            tone: roundFailed ? "error" : emptyTotal ? "info" : "success",
+            text: `运行结束：新增 ${addedTotal} 条数据，无数据 ${emptyTotal} 个关键词，风控 ${riskTotal} 个关键词，失败 ${roundFailed} 个关键词。`
           };
           state.tab = addedTotal ? "data" : "records";
           break;
@@ -1102,7 +1298,7 @@ export async function mountGoogleNewsMonitor(container, context) {
         const nextRunAt = new Date(Date.now() + pollingMs);
         state.notice = {
           tone: roundFailed ? "warning" : "success",
-          text: `第 ${round} 轮完成，新增 ${roundAdded} 条；下一轮 ${formatTime(nextRunAt)} 开始。`
+          text: `第 ${round} 轮完成，新增 ${roundAdded} 条，无数据 ${roundEmpty} 个关键词；下一轮 ${formatTime(nextRunAt)} 开始。`
         };
         saveState(state);
         render();
@@ -1137,6 +1333,8 @@ export async function mountGoogleNewsMonitor(container, context) {
         state.running = false;
         state.stopping = false;
       }
+      control.verificationPending = false;
+      state.verificationPending = false;
       saveState(state);
       render();
       globalThis.dispatchEvent?.(new Event(GOOGLE_NEWS_RUN_FINISHED_EVENT));
@@ -1165,6 +1363,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     const latest = await loadSavedState().catch(() => null);
     state.running = false;
     state.stopping = false;
+    state.verificationPending = false;
     state.config = latest?.config ? normalizeConfig(latest.config) : state.config;
     state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
     state.dataRows = Array.isArray(latest?.dataRows)
@@ -1175,6 +1374,22 @@ export async function mountGoogleNewsMonitor(container, context) {
       : state.dataRows;
     state.notice = latest?.notice || state.notice;
     syncJsonDraft();
+    render();
+  };
+
+  const handleLiveRunStatus = async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.running = Boolean(activeGoogleNewsRun);
+    state.stopping = Boolean(activeGoogleNewsRun?.stopRequested);
+    state.verificationPending = Boolean(activeGoogleNewsRun?.verificationPending);
+    state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+    state.dataRows = Array.isArray(latest?.dataRows)
+      ? applyItemLimit(
+        latest.dataRows.map(normalizeStoredDataRow),
+        state.dataStorageLimit
+      )
+      : state.dataRows;
+    state.notice = latest?.notice || state.notice;
     render();
   };
 
@@ -1227,14 +1442,21 @@ export async function mountGoogleNewsMonitor(container, context) {
       render();
       return;
     }
+    if (action === "set-input-list-page") {
+      state.inputListPage = clampInputListPage(button.dataset.page, state.config.keywords);
+      render();
+      return;
+    }
     if (action === "add-keyword") {
       state.config.keywords.push("");
+      state.inputListPage = pageForInputIndex(state.config.keywords.length - 1);
       render();
       container.querySelector(`[data-keyword-index="${state.config.keywords.length - 1}"]`)?.focus();
       return;
     }
     if (action === "remove-keyword") {
       state.config.keywords.splice(Number(button.dataset.index), 1);
+      state.inputListPage = clampInputListPage(state.inputListPage, state.config.keywords);
       saveState(state);
       render();
       return;
@@ -1271,6 +1493,7 @@ export async function mountGoogleNewsMonitor(container, context) {
         requestAnimationFrame(() => container.querySelector("[data-batch-input]")?.focus());
       } else {
         state.config.keywords = keywords;
+        state.inputListPage = 1;
         state.batchOpen = false;
         state.notice = { tone: "success", text: `已应用 ${keywords.length} 个关键词。` };
         syncJsonDraft();
@@ -1317,6 +1540,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     }
     if (action === "reset") {
       state.config = cloneSampleConfig();
+      state.inputListPage = 1;
       state.optionsOpen = false;
       state.notice = { tone: "success", text: "已还原示例输入。" };
       syncJsonDraft();
@@ -1385,6 +1609,7 @@ export async function mountGoogleNewsMonitor(container, context) {
   container.addEventListener("change", handleChange);
   document.addEventListener("keydown", handleKeydown);
   globalThis.addEventListener?.(GOOGLE_NEWS_RUN_FINISHED_EVENT, handleLiveRunFinished);
+  globalThis.addEventListener?.(GOOGLE_NEWS_RUN_STATUS_EVENT, handleLiveRunStatus);
   render();
 
   return () => {
@@ -1395,6 +1620,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     container.removeEventListener("change", handleChange);
     document.removeEventListener("keydown", handleKeydown);
     globalThis.removeEventListener?.(GOOGLE_NEWS_RUN_FINISHED_EVENT, handleLiveRunFinished);
+    globalThis.removeEventListener?.(GOOGLE_NEWS_RUN_STATUS_EVENT, handleLiveRunStatus);
     container.replaceChildren();
   };
 }

@@ -20,7 +20,15 @@
 
 ## 数据字段
 
-`keyword`、`title`、`description`、`source`、`publishedAt`、`url`、`capturedAt`。
+`keyword`、`title`、`description`、`source`、`publishedAt`、`url`、`collectedAt`。
+
+`publishedAt` 优先读取 Google 新闻结果节点的 `data-ts` 精确时间戳，并统一转换为本地 `YYYY-MM-DD HH:mm:ss`；页面没有时间戳时，才根据“36 分钟前”等相对时间和实际采集时刻进行换算。`collectedAt` 是独立的采集时间，采用相同格式。
+
+Google 明确显示“未搜到与…相关的新闻”时，该关键词会记录为“无数据”而不是“失败”，结果数量为 0；扩展创建的搜索标签页会按正常完成流程自动关闭。
+
+Google 跳转到 `/sorry/`、显示 reCAPTCHA、人机验证或异常流量提示时，当前关键词会进入“等待验证”状态。扩展会暂停任务超时计时、停止并回收同批其他 Google 采集页，只保留并自动切换到一个验证页面。用户手动完成 reCAPTCHA 后，扩展通过页面离开 `/sorry/` 并返回原 `tbm=nws` 新闻搜索页判断验证通过；冷却 5 秒后继续当前关键词，并恢复本轮未完成关键词和循环监控。
+
+扩展不会读取验证码答案，也不会自动点击或绕过 reCAPTCHA。用户在等待期间点击“停止全部”时，验证页和其他由扩展创建的 Google 标签页会一并关闭。普通页面超时或解析异常仍记录为“失败”并保留现场页面，便于排查。
 
 ## 数据与记录
 

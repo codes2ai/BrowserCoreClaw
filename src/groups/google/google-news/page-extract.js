@@ -49,10 +49,10 @@ export function extractGoogleNewsResults(options) {
   function machineTimeFrom(node) {
     if (!node) return "";
     const value = clean(
-      node.getAttribute("datetime")
-      || node.getAttribute("data-time")
-      || node.getAttribute("data-ts")
+      node.getAttribute("data-ts")
       || node.getAttribute("data-timestamp")
+      || node.getAttribute("datetime")
+      || node.getAttribute("data-time")
     );
     if (!/^\d{10,13}$/.test(value)) return value;
     const timestamp = Number(value) * (value.length === 10 ? 1000 : 1);
@@ -61,7 +61,10 @@ export function extractGoogleNewsResults(options) {
   }
 
   function findPublication(container, textLines) {
-    const timeNode = container.querySelector("time, [datetime], [data-time], [data-ts], [data-timestamp]");
+    // Google 新闻当前把精确 Unix 秒时间戳放在可见相对时间节点的 data-ts 上。
+    // 必须优先选择该节点，避免被卡片中其他 datetime/data-time 属性干扰。
+    const timeNode = container.querySelector("[data-ts], [data-timestamp]")
+      || container.querySelector("time, [datetime], [data-time]");
     const label = clean(timeNode?.innerText || timeNode?.textContent) || timeLabelFrom(textLines);
     const machineTime = machineTimeFrom(timeNode);
     return {

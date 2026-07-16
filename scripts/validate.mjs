@@ -80,6 +80,8 @@ const runStatusSource = readFileSync(join(root, "src/shared/feature-run-status.j
 const globalSettingsSource = readFileSync(join(root, "src/shared/global-settings.js"), "utf8");
 const taskTimeoutSource = readFileSync(join(root, "src/shared/task-timeout.js"), "utf8");
 const executionIntervalSource = readFileSync(join(root, "src/shared/execution-interval.js"), "utf8");
+const inputListPaginationSource = readFileSync(join(root, "src/shared/input-list-pagination.js"), "utf8");
+const featureShellSource = readFileSync(join(root, "src/groups/feature-shell.css"), "utf8");
 const appSource = readFileSync(join(root, "src/app/app.js"), "utf8");
 if (
   !runStatusSource.includes("FEATURE_RUN_STATUS_EVENT")
@@ -103,8 +105,33 @@ if (
   || !taskTimeoutSource.includes("runWithTaskTimeout")
   || !executionIntervalSource.includes("DEFAULT_EXECUTION_INTERVAL_MIN_MS = 1000")
   || !executionIntervalSource.includes("DEFAULT_EXECUTION_INTERVAL_MAX_MS = 6000")
+  || !inputListPaginationSource.includes("DEFAULT_INPUT_LIST_PAGE_SIZE = 10")
+  || !featureShellSource.includes(".input-list-pagination")
 ) {
   throw new Error("全局基础、Limit、存储设置或任务超时控制没有完整接入。 ");
+}
+
+const paginatedInputMonitors = [
+  ["src/groups/google/google-news/monitor.js", 'state.config.keywords.join("\\n")'],
+  ["src/groups/xiaohongshu/keyword-search/monitor.js", 'state.config.keywords.join("\\n")'],
+  ["src/groups/xiaohongshu/profile-notes/monitor.js", 'state.profileUrls.filter(Boolean).join("\\n")'],
+  ["src/groups/xiaohongshu/profile-info/monitor.js", 'state.profileUrls.filter(Boolean).join("\\n")'],
+  ["src/groups/weibo/profile-monitor.js", 'state.profileUrls.filter(Boolean).join("\\n")']
+];
+for (const [relativePath, completeBatchMarker] of paginatedInputMonitors) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  if (
+    !source.includes("paginateInputList")
+    || !source.includes("renderInputListPagination")
+    || !source.includes("inputListPage")
+    || (
+      !source.includes('case "set-input-list-page"')
+      && !source.includes('action === "set-input-list-page"')
+    )
+    || !source.includes(completeBatchMarker)
+  ) {
+    throw new Error(`输入列表分页或全量批量编辑没有完整接入：${relativePath}`);
+  }
 }
 
 for (const relativePath of [
@@ -163,6 +190,71 @@ const recordsModule = await import(pathToFileURL(join(
   root,
   "src/groups/google/google-news/monitor.js"
 )).href);
+const googleNewsBackgroundModule = await import(pathToFileURL(join(
+  root,
+  "src/groups/google/google-news/background.js"
+)).href);
+for (const noResultsText of [
+  "未搜到与“讯飞星火”相关的新闻。",
+  "未搜到与“\n讯飞星火\n”相关的新闻。",
+  "未找到与测试词相关的新闻",
+  "Your search did not match any news results",
+  "No news results"
+]) {
+  if (!googleNewsBackgroundModule.isGoogleNewsNoResultsText(noResultsText)) {
+    throw new Error(`Google 新闻无数据提示没有被识别：${noResultsText}`);
+  }
+}
+if (googleNewsBackgroundModule.isGoogleNewsNoResultsText("OpenAI 发布了新的模型产品")) {
+  throw new Error("正常 Google 新闻正文被错误识别为无数据。 ");
+}
+for (const riskControlState of [
+  { href: "https://www.google.com/sorry/index?continue=https://www.google.com/search" },
+  { pathname: "/sorry/index" },
+  { text: "我们的系统检测到您的计算机网络中存在异常流量。请进行人机身份验证。" },
+  { hasCaptchaFrame: true }
+]) {
+  if (!googleNewsBackgroundModule.isGoogleNewsRiskControlState(riskControlState)) {
+    throw new Error(`Google 风控页面没有被识别：${JSON.stringify(riskControlState)}`);
+  }
+}
+if (googleNewsBackgroundModule.isGoogleNewsRiskControlState({
+  href: "https://www.google.com/search?q=OpenAI&tbm=nws",
+  text: "OpenAI 发布了新的模型产品"
+})) {
+  throw new Error("正常 Google 新闻结果页被错误识别为风控页面。 ");
+}
+const inputListPaginationModule = await import(pathToFileURL(join(
+  root,
+  "src/shared/input-list-pagination.js"
+)).href);
+const paginationItems = Array.from({ length: 50 }, (_, index) => `item-${index + 1}`);
+const firstInputPage = inputListPaginationModule.paginateInputList(paginationItems, 1);
+const lastInputPage = inputListPaginationModule.paginateInputList(paginationItems, 99);
+if (
+  firstInputPage.page !== 1
+  || firstInputPage.pageCount !== 5
+  || firstInputPage.items.length !== 10
+  || firstInputPage.items[0]?.index !== 0
+  || firstInputPage.items[9]?.index !== 9
+  || lastInputPage.page !== 5
+  || lastInputPage.items[0]?.index !== 40
+  || lastInputPage.items[9]?.index !== 49
+  || inputListPaginationModule.pageForInputIndex(49) !== 5
+  || inputListPaginationModule.clampInputListPage(5, paginationItems.slice(0, 40)) !== 4
+) {
+  throw new Error("输入列表没有按每页 10 条正确分页或保留原始索引。 ");
+}
+const inputPaginationHtml = inputListPaginationModule.renderInputListPagination(lastInputPage, {
+  itemLabel: "个关键词"
+});
+if (
+  !inputPaginationHtml.includes("显示 41-50 / 50 个关键词")
+  || !inputPaginationHtml.includes('data-action="set-input-list-page"')
+  || !inputPaginationHtml.includes('aria-current="page"')
+) {
+  throw new Error("输入列表分页控件没有正确展示范围、页码和导航操作。 ");
+}
 const sharedDateModule = await import(pathToFileURL(join(root, "src/shared/date-normalizer.js")).href);
 const googleDateReference = new Date(2026, 6, 15, 0, 15, 0);
 const googlePublishedDateCases = new Map([
@@ -182,6 +274,23 @@ for (const [rawDate, expectedDate] of googlePublishedDateCases) {
 }
 if (sharedDateModule.formatLocalCalendarDate(googleDateReference) !== "2026-07-15") {
   throw new Error("Google 新闻采集时间没有转换为本地 YYYY-MM-DD。 ");
+}
+const googlePublishedDateTimeCases = new Map([
+  ["30分钟前", "2026-07-14 23:45:00"],
+  ["2小时前", "2026-07-14 22:15:00"],
+  ["just now", "2026-07-15 00:15:00"]
+]);
+for (const [rawDate, expectedDate] of googlePublishedDateTimeCases) {
+  const normalizedDate = sharedDateModule.normalizePublishedDateTime(rawDate, {
+    referenceDate: googleDateReference
+  });
+  if (normalizedDate !== expectedDate) {
+    throw new Error(`Google 新闻精确发布时间 ${rawDate} 标准化错误：${normalizedDate}，预期 ${expectedDate}。`);
+  }
+}
+const googleMachineTimeReference = new Date(2026, 6, 15, 16, 2, 37);
+if (sharedDateModule.formatLocalDateTime(googleMachineTimeReference) !== "2026-07-15 16:02:37") {
+  throw new Error("Google 新闻时间戳没有转换为本地 YYYY-MM-DD HH:mm:ss。 ");
 }
 const googleNewsExportModule = await import(pathToFileURL(join(
   root,
@@ -286,7 +395,14 @@ await new Promise((resolve) => setTimeout(resolve, 0));
 if (!timeoutStopCalled || timeoutError?.code !== taskTimeoutModule.TASK_TIMEOUT_ERROR_CODE) {
   throw new Error("任务超时没有停止对应任务并返回失败状态。 ");
 }
-const recordStatuses = ["running", "success", "partial", "error", "stopped", "preview"];
+const pausedTimeoutResult = await taskTimeoutModule.runWithTaskTimeout(
+  () => new Promise((resolve) => setTimeout(() => resolve("verified"), 20)),
+  { timeoutSeconds: 0.005, isPaused: () => true }
+);
+if (pausedTimeoutResult !== "verified") {
+  throw new Error("人工验证期间任务超时没有暂停计时。 ");
+}
+const recordStatuses = ["running", "success", "empty", "verification", "risk", "partial", "error", "stopped", "preview"];
 const recordFixtures = recordStatuses.flatMap((statusKey) => (
   Array.from({ length: 205 }, (_, index) => ({
     id: `${statusKey}-${index}`,
@@ -433,6 +549,7 @@ const googleNewsPageExtractSource = readFileSync(join(
 if (
   !googleNewsPageExtractSource.includes("a.aJWbwf")
   || !googleNewsPageExtractSource.includes('getAttribute("data-ts")')
+  || !googleNewsPageExtractSource.includes('container.querySelector("[data-ts], [data-timestamp]")')
   || !googleNewsPageExtractSource.includes("publishedAtTimestamp")
 ) {
   throw new Error("Google 新闻没有按单条卡片读取真实发布时间戳。 ");
@@ -465,7 +582,7 @@ const profileRecordFixtures = recordStatuses.flatMap((statusKey) => (
   Array.from({ length: 205 }, (_, index) => ({ id: `${statusKey}-${index}`, statusKey }))
 ));
 const limitedProfileRecords = xiaohongshuProfileMonitor.limitProfileRecordsPerStatus(profileRecordFixtures);
-for (const statusKey of recordStatuses.filter((statusKey) => statusKey !== "preview")) {
+for (const statusKey of recordStatuses.filter((statusKey) => !["preview", "empty", "verification", "risk"].includes(statusKey))) {
   const count = limitedProfileRecords.filter((record) => (
     xiaohongshuProfileMonitor.getProfileRecordStatusKey(record) === statusKey
   )).length;
@@ -668,11 +785,27 @@ for (const relativePath of targetTabCleanupFiles) {
   }
 }
 const googleMonitorCleanupSource = readFileSync(join(root, "src/groups/google/google-news/monitor.js"), "utf8");
+const googleBackgroundCleanupSource = readFileSync(join(root, "src/groups/google/google-news/background.js"), "utf8");
 if (
   !googleMonitorCleanupSource.includes("ownedTargetTabIds")
   || !googleMonitorCleanupSource.includes("closePluginCreatedGoogleTab")
+  || !googleMonitorCleanupSource.includes('finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "empty", 0)')
+  || !googleMonitorCleanupSource.includes('finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "risk", 0, errorText)')
+  || !googleMonitorCleanupSource.includes("riskControlTriggered")
+  || !googleMonitorCleanupSource.includes("haltForRiskControl")
+  || !googleMonitorCleanupSource.includes("verificationPending")
+  || !googleMonitorCleanupSource.includes("isPaused:")
+  || !googleMonitorCleanupSource.includes("MESSAGE_GOOGLE_NEWS_CAPTURE_STATUS")
+  || !googleBackgroundCleanupSource.includes("empty: Boolean(pageState?.noResults")
+  || !googleBackgroundCleanupSource.includes("isGoogleNewsNoResultsText")
+  || !googleBackgroundCleanupSource.includes("isGoogleNewsRiskControlState")
+  || !googleBackgroundCleanupSource.includes('notifyCaptureStatus(session, "waiting_verification"')
+  || !googleBackgroundCleanupSource.includes('notifyCaptureStatus(session, "verification_passed"')
+  || !googleBackgroundCleanupSource.includes('notifyCaptureStatus(session, "capture_resumed"')
+  || !googleBackgroundCleanupSource.includes("focusVerificationTab")
+  || !serviceWorkerSource.includes("errorCode: error.code")
 ) {
-  throw new Error("Google 新闻监控没有清理其创建的采集标签页。 ");
+  throw new Error("Google 新闻监控没有完整处理无数据、人工验证恢复或采集标签页清理。 ");
 }
 
 const persistentFeatureRuns = [

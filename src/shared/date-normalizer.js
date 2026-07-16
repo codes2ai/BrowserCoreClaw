@@ -20,9 +20,19 @@ function formatLocalDate(date) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }
 
+function formatLocalDateAndTime(date) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${formatLocalDate(date)} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
 export function formatLocalCalendarDate(value = new Date()) {
   const date = asValidReferenceDate(value);
   return formatLocalDate(date);
+}
+
+export function formatLocalDateTime(value = new Date()) {
+  const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : formatLocalDateAndTime(date);
 }
 
 function atReferenceTime(referenceDate) {
@@ -156,4 +166,84 @@ export function normalizePublishedDate(value, options = {}) {
   }
 
   return "";
+}
+
+/**
+ * 将精确时间戳和相对时间统一为本地 YYYY-MM-DD HH:mm:ss。
+ * 如果来源只提供日期而没有时刻，则保留 YYYY-MM-DD，避免虚构时间。
+ */
+export function normalizePublishedDateTime(value, options = {}) {
+  const raw = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!raw) return "";
+
+  const referenceDate = asValidReferenceDate(options.referenceDate);
+  if (/^\d{10,13}$/.test(raw)) {
+    const timestamp = Number(raw) * (raw.length === 10 ? 1000 : 1);
+    return formatLocalDateTime(timestamp);
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}T/i.test(raw)) {
+    const machineDate = new Date(raw);
+    if (!Number.isNaN(machineDate.getTime())) {
+      return formatLocalDateAndTime(machineDate);
+    }
+  }
+
+  const shiftTime = (milliseconds) => {
+    const shifted = new Date(referenceDate.getTime() - milliseconds);
+    return formatLocalDateAndTime(shifted);
+  };
+
+  if (/刚刚|just now|today|今天/i.test(raw)) {
+    return formatLocalDateAndTime(referenceDate);
+  }
+  if (/less than an hour/i.test(raw)) {
+    return shiftTime(30 * 60 * 1000);
+  }
+
+  const seconds = raw.match(/(\d+)\s*(?:秒|seconds?|secs?)\s*(?:前|ago)?/i);
+  if (seconds) return shiftTime(Number(seconds[1]) * 1000);
+
+  const minutes = raw.match(/(\d+)\s*(?:分钟|minutes?|mins?)\s*(?:前|ago)?/i);
+  if (minutes) return shiftTime(Number(minutes[1]) * 60 * 1000);
+
+  const hours = raw.match(/(\d+)\s*(?:小时|hours?|hrs?)\s*(?:前|ago)?/i);
+  if (hours) return shiftTime(Number(hours[1]) * 60 * 60 * 1000);
+  if (/\b(?:an?|one)\s+hour\s+ago\b/i.test(raw)) {
+    return shiftTime(60 * 60 * 1000);
+  }
+
+  const relativeDayCount = /前天/.test(raw)
+    ? 2
+    : /昨天|yesterday/i.test(raw)
+      ? 1
+      : Number(raw.match(/(\d+)\s*(?:天|days?)\s*(?:前|ago)/i)?.[1] || NaN);
+  if (Number.isFinite(relativeDayCount)) {
+    const shifted = new Date(referenceDate.getTime());
+    shifted.setDate(shifted.getDate() - relativeDayCount);
+    return formatLocalDateAndTime(shifted);
+  }
+
+  const relativeWeeks = raw.match(/(\d+)\s*(?:周|星期|weeks?)\s*(?:前|ago)/i);
+  if (relativeWeeks) {
+    const shifted = new Date(referenceDate.getTime());
+    shifted.setDate(shifted.getDate() - Number(relativeWeeks[1]) * 7);
+    return formatLocalDateAndTime(shifted);
+  }
+
+  const relativeMonths = raw.match(/(\d+)\s*(?:个月|months?)\s*(?:前|ago)/i);
+  if (relativeMonths) {
+    const shifted = new Date(referenceDate.getTime());
+    shifted.setMonth(shifted.getMonth() - Number(relativeMonths[1]));
+    return formatLocalDateAndTime(shifted);
+  }
+
+  const relativeYears = raw.match(/(\d+)\s*(?:年|years?)\s*(?:前|ago)/i);
+  if (relativeYears) {
+    const shifted = new Date(referenceDate.getTime());
+    shifted.setFullYear(shifted.getFullYear() - Number(relativeYears[1]));
+    return formatLocalDateAndTime(shifted);
+  }
+
+  return normalizePublishedDate(raw, { referenceDate });
 }
