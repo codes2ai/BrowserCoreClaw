@@ -1,5 +1,5 @@
 import { MESSAGE_CAPTURE_DOUYIN_PROFILE_POSTS, MESSAGE_STOP_DOUYIN_PROFILE_POSTS } from "./constants.js";
-import { downloadDouyinProfilePostsData } from "./export-data.js";
+import { buildDouyinProfilePostsExportRows, downloadDouyinProfilePostsData } from "./export-data.js";
 import { isDouyinProfileUrl } from "../capture.js";
 import { createWeiboProfileMonitor } from "../../weibo/profile-monitor.js";
 
@@ -27,11 +27,22 @@ export const mountDouyinProfilePostsMonitor = createWeiboProfileMonitor({
   guideWaitText: "程序会确认主页资料和作品列表连续稳定后，再开始读取并在需要时滚动加载。",
   fieldList: "videoId · text · likes · cover · url",
   dataSummary: "作品按抖音主页卡片原始顺序保存。",
+  emptyDataText: "运行后，抖音主页作品会显示在这里",
+  dataFilters: [
+    { key: "profileUrl", label: "博主主页", type: "select" },
+    { key: "pageOrder", label: "顺序" },
+    { key: "videoId", label: "作品 ID" },
+    { key: "text", label: "作品描述" },
+    { key: "likes", label: "点赞" },
+    { key: "url", label: "作品链接" },
+    { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
+  ],
   toRows(data, profileUrl) {
     return (data?.posts || []).map((post) => ({ id: `${profileUrl}|${post.videoId || post.url}`, profileUrl, pageOrder: post.order, ...post, capturedAt: data?.capturedAt || new Date().toISOString() }));
   },
   downloadData: downloadDouyinProfilePostsData,
-  renderDataTable(rows, escapeHtml) {
-    return `<thead><tr><th>顺序</th><th>作品 ID</th><th>作品描述</th><th>点赞</th><th>封面</th><th>作品链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${row.pageOrder || "-"}</td><td>${escapeHtml(row.videoId || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.text || "")}">${escapeHtml(row.text || "-")}</td><td>${escapeHtml(row.likes || "-")}</td><td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td><td>${row.url ? `<a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">运行后，抖音主页作品会显示在这里</td></tr>`}</tbody>`;
+  buildExportRows: buildDouyinProfilePostsExportRows,
+  renderDataTable(rows, escapeHtml, { emptyText } = {}) {
+    return `<thead><tr><th>顺序</th><th>作品 ID</th><th>作品描述</th><th>点赞</th><th>封面</th><th>作品链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${row.pageOrder || "-"}</td><td>${escapeHtml(row.videoId || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.text || "")}">${escapeHtml(row.text || "-")}</td><td>${escapeHtml(row.likes || "-")}</td><td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td><td>${row.url ? `<a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">${escapeHtml(emptyText || "运行后，抖音主页作品会显示在这里")}</td></tr>`}</tbody>`;
   }
 });

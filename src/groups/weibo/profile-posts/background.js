@@ -1,4 +1,4 @@
-import { attachDebugger, detachDebugger, evaluate, sendCommand, sleep } from "../../../background/debugger-client.js";
+import { executeTabFunction, navigateTab, sleep } from "../../../background/tab-script-client.js";
 import {
   WEIBO_HOME_URL,
   WEIBO_PROFILE_READY_TIMEOUT_MS,
@@ -61,7 +61,7 @@ function throwIfStopped(session) {
 }
 
 function pageCommand(tabId, command, options = {}) {
-  return evaluate(tabId, `(${runWeiboPageCommand.toString()})(${JSON.stringify(command)}, ${JSON.stringify(options)})`);
+  return executeTabFunction(tabId, runWeiboPageCommand, [command, options]);
 }
 
 async function waitForWeiboProfile(tabId, session) {
@@ -152,23 +152,17 @@ export async function captureWeiboProfilePosts(options) {
   if (!Number.isInteger(tab?.id)) throw new Error("无法找到用于微博博文采集的标签页。");
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
-  let attached = false;
   let completed = false;
   try {
     if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
-    await attachDebugger(tab.id);
-    attached = true;
-    await sendCommand(tab.id, "Runtime.enable");
-    await sendCommand(tab.id, "Page.enable");
     throwIfStopped(session);
-    await sendCommand(tab.id, "Page.navigate", { url: profileUrl });
+    await navigateTab(tab.id, profileUrl);
     await waitForWeiboProfile(tab.id, session);
     const data = await collectPosts(tab.id, options.limit, session);
     completed = true;
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
-    if (attached) await detachDebugger(tab.id).catch(() => {});
     if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
@@ -177,6 +171,5 @@ export async function stopWeiboProfilePostsCapture(options) {
   const session = activeCaptures.get(String(options.runId || "").trim());
   if (!session) return { ok: true, stopped: false };
   session.stopped = true;
-  await detachDebugger(session.tabId).catch(() => {});
   return { ok: true, stopped: true };
 }

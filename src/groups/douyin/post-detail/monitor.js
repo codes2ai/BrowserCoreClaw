@@ -1,5 +1,5 @@
 import { MESSAGE_CAPTURE_DOUYIN_POST_DETAIL, MESSAGE_STOP_DOUYIN_POST_DETAIL } from "./constants.js";
-import { downloadDouyinPostDetailData } from "./export-data.js";
+import { buildDouyinPostDetailExportRows, downloadDouyinPostDetailData } from "./export-data.js";
 import { isDouyinPostUrl } from "../capture.js";
 import { createWeiboProfileMonitor } from "../../weibo/profile-monitor.js";
 
@@ -33,13 +33,28 @@ export const mountDouyinPostDetailMonitor = createWeiboProfileMonitor({
   hasLimit: false,
   supportsPolling: false,
   dataSummary: "每条作品链接只保留最新一条详情数据。",
+  emptyDataText: "运行后，抖音作品详情会显示在这里",
+  dataFilters: [
+    { key: "videoId", label: "作品 ID" },
+    { key: "author", label: "作者", type: "select" },
+    { key: "text", label: "作品描述" },
+    { key: "publishedAt", label: "发布时间", placeholder: "例如 2026-07-15" },
+    { key: "likes", label: "点赞" },
+    { key: "comments", label: "评论" },
+    { key: "favorites", label: "收藏" },
+    { key: "shares", label: "分享" },
+    { key: "topics", label: "话题" },
+    { key: "postUrl", label: "作品链接" },
+    { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
+  ],
   toRows(data, postUrl) {
     const detail = data?.detail || {};
     const id = String(detail.videoId || detail.postUrl || postUrl || "").trim();
     return id ? [{ id, ...detail, postUrl: detail.postUrl || postUrl, capturedAt: data?.capturedAt || new Date().toISOString() }] : [];
   },
   downloadData: downloadDouyinPostDetailData,
-  renderDataTable(rows, escapeHtml) {
-    return `<thead><tr><th>作品 ID</th><th>作者</th><th>作品描述</th><th>发布时间</th><th>点赞</th><th>评论</th><th>收藏</th><th>分享</th><th>话题</th><th>封面</th><th>媒体链接</th><th>作品链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${escapeHtml(row.videoId || "-")}</td><td>${row.authorUrl ? `<a href="${escapeHtml(row.authorUrl)}" target="_blank" rel="noreferrer">${escapeHtml(row.author || "-")}</a>` : escapeHtml(row.author || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.text || "")}">${escapeHtml(row.text || "-")}</td><td>${escapeHtml(row.publishedAt || "-")}</td><td>${escapeHtml(row.likes || "-")}</td><td>${escapeHtml(row.comments || "-")}</td><td>${escapeHtml(row.favorites || "-")}</td><td>${escapeHtml(row.shares || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.topics || "")}">${escapeHtml(row.topics || "-")}</td><td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td><td class="xhs-description-cell" title="${escapeHtml(row.mediaUrls || "")}">${escapeHtml(row.mediaUrls || "-")}</td><td>${row.postUrl ? `<a href="${escapeHtml(row.postUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="13">运行后，抖音作品详情会显示在这里</td></tr>`}</tbody>`;
+  buildExportRows: buildDouyinPostDetailExportRows,
+  renderDataTable(rows, escapeHtml, { emptyText } = {}) {
+    return `<thead><tr><th>作品 ID</th><th>作者</th><th>作品描述</th><th>发布时间</th><th>点赞</th><th>评论</th><th>收藏</th><th>分享</th><th>话题</th><th>封面</th><th>媒体链接</th><th>作品链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${escapeHtml(row.videoId || "-")}</td><td>${row.authorUrl ? `<a href="${escapeHtml(row.authorUrl)}" target="_blank" rel="noreferrer">${escapeHtml(row.author || "-")}</a>` : escapeHtml(row.author || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.text || "")}">${escapeHtml(row.text || "-")}</td><td>${escapeHtml(row.publishedAt || "-")}</td><td>${escapeHtml(row.likes || "-")}</td><td>${escapeHtml(row.comments || "-")}</td><td>${escapeHtml(row.favorites || "-")}</td><td>${escapeHtml(row.shares || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.topics || "")}">${escapeHtml(row.topics || "-")}</td><td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td><td class="xhs-description-cell" title="${escapeHtml(row.mediaUrls || "")}">${escapeHtml(row.mediaUrls || "-")}</td><td>${row.postUrl ? `<a href="${escapeHtml(row.postUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="13">${escapeHtml(emptyText || "运行后，抖音作品详情会显示在这里")}</td></tr>`}</tbody>`;
   }
 });

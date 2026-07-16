@@ -1,5 +1,5 @@
 // This function is serialized and executed in the target Douyin page through
-// the Chrome DevTools protocol. Keep it self-contained: no imported helpers.
+// chrome.scripting. Keep it self-contained: no imported helpers.
 export async function runDouyinPageCommand(command, options = {}) {
   const text = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const lineList = (value) => String(value || "").split(/\n+/).map(text).filter(Boolean);

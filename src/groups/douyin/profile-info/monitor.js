@@ -1,5 +1,5 @@
 import { MESSAGE_CAPTURE_DOUYIN_PROFILE_INFO, MESSAGE_STOP_DOUYIN_PROFILE_INFO } from "./constants.js";
-import { downloadDouyinProfileInfoData } from "./export-data.js";
+import { buildDouyinProfileInfoExportRows, downloadDouyinProfileInfoData } from "./export-data.js";
 import { isDouyinProfileUrl } from "../capture.js";
 import { createWeiboProfileMonitor } from "../../weibo/profile-monitor.js";
 
@@ -27,13 +27,30 @@ export const mountDouyinProfileInfoMonitor = createWeiboProfileMonitor({
   guideWaitText: "程序会等待资料区连续稳定后再读取；遇到平台安全验证时会提示你在当前标签页完成。",
   fieldList: "profileId · douyinId · avatar · nickname · following · followers · likes · ipLocation · age · location · bio · profileTags · profileRawText",
   dataSummary: "每个主页只保留最新一条博主资料。",
+  emptyDataText: "运行后，抖音博主公开资料会显示在这里",
+  dataFilters: [
+    { key: "nickname", label: "昵称" },
+    { key: "profileId", label: "主页 ID" },
+    { key: "douyinId", label: "抖音号" },
+    { key: "following", label: "关注" },
+    { key: "followers", label: "粉丝" },
+    { key: "likes", label: "获赞" },
+    { key: "ipLocation", label: "IP 属地", type: "select" },
+    { key: "age", label: "年龄" },
+    { key: "location", label: "地区", type: "select" },
+    { key: "bio", label: "简介" },
+    { key: "profileTags", label: "标签" },
+    { key: "profileUrl", label: "主页链接" },
+    { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
+  ],
   toRows(data, profileUrl) {
     const profile = data?.profile || {};
     const id = String(profile.profileId || profileUrl || "").trim();
     return id ? [{ id, ...profile, profileUrl: profile.profileUrl || profileUrl, capturedAt: data?.capturedAt || new Date().toISOString() }] : [];
   },
   downloadData: downloadDouyinProfileInfoData,
-  renderDataTable(rows, escapeHtml) {
-    return `<thead><tr><th>头像</th><th>昵称</th><th>主页 ID</th><th>抖音号</th><th>关注</th><th>粉丝</th><th>获赞</th><th>IP 属地</th><th>年龄</th><th>地区</th><th>简介</th><th>标签</th><th>公开资料原文</th><th>主页链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${row.avatar ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.avatar)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.nickname || "-")}</td><td>${escapeHtml(row.profileId || "-")}</td><td>${escapeHtml(row.douyinId || "-")}</td><td>${escapeHtml(row.following || "-")}</td><td>${escapeHtml(row.followers || "-")}</td><td>${escapeHtml(row.likes || "-")}</td><td>${escapeHtml(row.ipLocation || "-")}</td><td>${escapeHtml(row.age || "-")}</td><td>${escapeHtml(row.location || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.bio || "")}">${escapeHtml(row.bio || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.profileTags || "")}">${escapeHtml(row.profileTags || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.profileRawText || "")}">${escapeHtml(row.profileRawText || "-")}</td><td>${row.profileUrl ? `<a href="${escapeHtml(row.profileUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="15">运行后，抖音博主公开资料会显示在这里</td></tr>`}</tbody>`;
+  buildExportRows: buildDouyinProfileInfoExportRows,
+  renderDataTable(rows, escapeHtml, { emptyText } = {}) {
+    return `<thead><tr><th>头像</th><th>昵称</th><th>主页 ID</th><th>抖音号</th><th>关注</th><th>粉丝</th><th>获赞</th><th>IP 属地</th><th>年龄</th><th>地区</th><th>简介</th><th>标签</th><th>公开资料原文</th><th>主页链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${row.avatar ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.avatar)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.nickname || "-")}</td><td>${escapeHtml(row.profileId || "-")}</td><td>${escapeHtml(row.douyinId || "-")}</td><td>${escapeHtml(row.following || "-")}</td><td>${escapeHtml(row.followers || "-")}</td><td>${escapeHtml(row.likes || "-")}</td><td>${escapeHtml(row.ipLocation || "-")}</td><td>${escapeHtml(row.age || "-")}</td><td>${escapeHtml(row.location || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.bio || "")}">${escapeHtml(row.bio || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.profileTags || "")}">${escapeHtml(row.profileTags || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.profileRawText || "")}">${escapeHtml(row.profileRawText || "-")}</td><td>${row.profileUrl ? `<a href="${escapeHtml(row.profileUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="15">${escapeHtml(emptyText || "运行后，抖音博主公开资料会显示在这里")}</td></tr>`}</tbody>`;
   }
 });

@@ -1,4 +1,5 @@
 import {
+  buildXiaohongshuProfileInfoExportRows,
   downloadXiaohongshuProfileInfoData
 } from "./export-data.js";
 import {
@@ -42,10 +43,28 @@ import {
   paginateInputList,
   renderInputListPagination
 } from "../../../shared/input-list-pagination.js";
+import {
+  createDataFilterValues,
+  filterDataRows,
+  openRowsJsonPreview,
+  renderDataFilterPanel
+} from "../../../shared/data-table-filter.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileInfoV1";
 const FEATURE_KEY = "xiaohongshu/profile-info";
 const ALL_RECORD_FILTER = "__all__";
+const DATA_FILTER_DEFINITIONS = Object.freeze([
+  { key: "nickname", label: "昵称" },
+  { key: "xiaohongshuId", label: "小红书号" },
+  { key: "ipLocation", label: "IP 属地", type: "select" },
+  { key: "bio", label: "简介" },
+  { key: "tags", label: "标签" },
+  { key: "following", label: "关注" },
+  { key: "followers", label: "粉丝" },
+  { key: "likedAndCollected", label: "获赞与收藏" },
+  { key: "profileUrl", label: "主页链接" },
+  { key: "capturedAt", label: "采集时间", placeholder: "例如 2025-11-18" }
+]);
 const DEFAULT_PROFILE_URLS = [""];
 const DEFAULT_OPTIONS = Object.freeze({ intervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS, intervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS, concurrency: DEFAULT_TASK_CONCURRENCY, polling: false, pollingMinutes: 10 });
 const STATUS = Object.freeze({
@@ -184,7 +203,8 @@ function renderRecords(state) {
 }
 
 function renderData(state) {
-  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每个主页仅保留最新一条博主资料。</p></div></div><div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table"><thead><tr><th>头像</th><th>昵称</th><th>小红书号</th><th>IP属地</th><th>简介</th><th>标签</th><th>关注</th><th>粉丝</th><th>获赞与收藏</th><th>主页链接</th><th>采集时间</th></tr></thead><tbody>${state.dataRows.length ? state.dataRows.map((row) => `<tr><td>${row.avatar ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.avatar)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.nickname || "-")}</td><td>${escapeHtml(row.xiaohongshuId || "-")}</td><td>${escapeHtml(row.ipLocation || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.bio || "")}">${escapeHtml(row.bio || "-")}</td><td>${escapeHtml(row.tags || "-")}</td><td>${escapeHtml(row.following || "-")}</td><td>${escapeHtml(row.followers || "-")}</td><td>${escapeHtml(row.likedAndCollected || "-")}</td><td>${row.profileUrl ? `<a href="${escapeHtml(row.profileUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="11">运行后，博主信息会显示在这里</td></tr>`}</tbody></table></div></section>`;
+  const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每个主页仅保留最新一条博主资料。</p></div></div>${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}<div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table"><thead><tr><th>头像</th><th>昵称</th><th>小红书号</th><th>IP属地</th><th>简介</th><th>标签</th><th>关注</th><th>粉丝</th><th>获赞与收藏</th><th>主页链接</th><th>采集时间</th></tr></thead><tbody>${filteredRows.length ? filteredRows.map((row) => `<tr><td>${row.avatar ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.avatar)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.nickname || "-")}</td><td>${escapeHtml(row.xiaohongshuId || "-")}</td><td>${escapeHtml(row.ipLocation || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.bio || "")}">${escapeHtml(row.bio || "-")}</td><td>${escapeHtml(row.tags || "-")}</td><td>${escapeHtml(row.following || "-")}</td><td>${escapeHtml(row.followers || "-")}</td><td>${escapeHtml(row.likedAndCollected || "-")}</td><td>${row.profileUrl ? `<a href="${escapeHtml(row.profileUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="11">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，博主信息会显示在这里"}</td></tr>`}</tbody></table></div></section>`;
 }
 
 function renderBatchModal(state) {
@@ -194,7 +214,7 @@ function renderBatchModal(state) {
 
 function renderGuide(state) {
   if (!state.guideOpen) return "";
-  return `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="xhsInfoGuideTitle"><header><div><span>QUICK START</span><h2 id="xhsInfoGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">功能会复用当前 Chrome Profile 的小红书登录会话，按主页链接采集公开的博主资料。</p><ol><li><strong>确认登录</strong><span>进入功能前会确认当前 Chrome Profile 的小红书登录状态。</span></li><li><strong>填写主页</strong><span>输入一个或多个 <code>/user/profile/</code> 主页链接。</span></li><li><strong>运行并导出</strong><span>程序确认资料区稳定后保存一条博主资料，可导出 JSON 或 CSV。</span></li></ol><div class="xhs-schema-box"><strong>采集字段</strong><code>avatar · nickname · xiaohongshuId · ipLocation · bio · tags · following · followers · likedAndCollected</code></div></div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>`;
+  return `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="xhsInfoGuideTitle"><header><div><span>QUICK START</span><h2 id="xhsInfoGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">功能会复用当前 Chrome Profile 的小红书登录会话，按主页链接采集公开的博主资料。</p><ol><li><strong>确认登录</strong><span>进入功能前会确认当前 Chrome Profile 的小红书登录状态。</span></li><li><strong>填写主页</strong><span>输入一个或多个 <code>/user/profile/</code> 主页链接。</span></li><li><strong>运行并导出</strong><span>程序确认资料区稳定后保存一条博主资料，支持筛选、复制 JSON 和导出 CSV 表格。</span></li></ol><div class="xhs-schema-box"><strong>采集字段</strong><code>avatar · nickname · xiaohongshuId · ipLocation · bio · tags · following · followers · likedAndCollected</code></div></div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>`;
 }
 
 function renderTaskDetails(state) {
@@ -209,7 +229,8 @@ function renderRunButton(state, className = "") {
 function renderActionBar(state) {
   if (state.tab === "params") return `<footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原输入</button><span>${state.running ? "任务运行中，参数已锁定；可以停止任务。" : "运行会打开小红书博主主页并采集资料区。"}</span></footer>`;
   if (state.tab === "records") return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>`;
-  return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>`;
+  const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+  return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="copy-json" ${filteredRows.length ? "" : "disabled"}>复制 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${filteredRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>筛选结果 ${filteredRows.length} / ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>`;
 }
 
 function renderPage(state, context) {
@@ -241,7 +262,7 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
   });
   const savedInterval = normalizeProfileIntervalRange(savedConfig);
   const state = {
-    tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS], inputListPage: 1, dataStorageLimit: storageLimits.dataStorageLimit, taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit, records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit), dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit), batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedInterval.intervalMinMs, intervalMaxMs: savedInterval.intervalMaxMs, polling: Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeInfoRun && !activeInfoRun.stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集资料。" }
+    tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS], inputListPage: 1, dataStorageLimit: storageLimits.dataStorageLimit, taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit, records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit), dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit), batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedInterval.intervalMinMs, intervalMaxMs: savedInterval.intervalMaxMs, polling: Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeInfoRun && !activeInfoRun.stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS), dataFiltersOpen: true, notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集资料。" }
   };
   saveState(state);
   let disposed = false;
@@ -385,7 +406,7 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
     state.notice = latest?.notice || state.notice;
     render();
   };
-  const handleClick = (event) => {
+  const handleClick = async (event) => {
     if (event.target.matches(".xhs-modal-backdrop")) { if (state.taskDetailRecordId) closeTask(); else if (state.guideOpen) { state.guideOpen = false; render(); } else { state.batchOpen = false; render(); } return; }
     const tab = event.target.closest("[data-tab]");
     if (tab) { state.tab = tab.dataset.tab; render(); return; }
@@ -395,6 +416,8 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
       case "run": startRun().catch((error) => { activeRun = null; activeInfoRun = null; state.running = false; state.stopping = false; state.notice = { tone: "error", text: error.message || String(error) }; render(); }); break;
       case "stop": stopRun().catch((error) => { state.notice = { tone: "error", text: `停止任务失败：${error.message || String(error)}` }; render(); }); break;
       case "toggle-options": state.optionsOpen = !state.optionsOpen; render(); break;
+      case "toggle-data-filters": state.dataFiltersOpen = !state.dataFiltersOpen; render(); break;
+      case "clear-data-filters": state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS); render(); break;
       case "set-input-list-page": state.inputListPage = clampInputListPage(button.dataset.page, state.profileUrls); render(); break;
       case "add-profile": state.profileUrls.push(""); state.inputListPage = pageForInputIndex(state.profileUrls.length - 1); render(); requestAnimationFrame(() => container.querySelector(`[data-profile-index="${state.profileUrls.length - 1}"]`)?.focus()); break;
       case "remove-profile": state.profileUrls.splice(Number(button.dataset.index), 1); state.inputListPage = clampInputListPage(state.inputListPage, state.profileUrls); saveState(state); render(); break;
@@ -406,14 +429,41 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
       case "open-task-detail": state.taskDetailRecordId = button.dataset.recordId; state.batchOpen = false; state.guideOpen = false; render(); break;
       case "close-task-detail": closeTask(); break;
       case "clear-records": state.records = []; state.recordFilters = { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }; state.taskDetailRecordId = ""; saveState(state); render(); break;
-      case "clear-data": state.dataRows = []; saveState(state); render(); break;
-      case "export-json": downloadXiaohongshuProfileInfoData(state.dataRows, "json"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` }; render(); break;
-      case "export-csv": downloadXiaohongshuProfileInfoData(state.dataRows, "csv"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` }; render(); break;
+      case "clear-data": state.dataRows = []; state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS); saveState(state); render(); break;
+      case "copy-json": {
+        const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+        try {
+          openRowsJsonPreview(rows, buildXiaohongshuProfileInfoExportRows);
+        } catch (error) {
+          state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
+          render();
+        }
+        break;
+      }
+      case "export-csv": {
+        const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+        downloadXiaohongshuProfileInfoData(rows, "csv");
+        state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
+        render();
+        break;
+      }
       case "reset": state.profileUrls = [...DEFAULT_PROFILE_URLS]; state.inputListPage = 1; state.concurrency = DEFAULT_OPTIONS.concurrency; state.intervalMinMs = DEFAULT_OPTIONS.intervalMinMs; state.intervalMaxMs = DEFAULT_OPTIONS.intervalMaxMs; state.polling = DEFAULT_OPTIONS.polling; state.pollingMinutes = DEFAULT_OPTIONS.pollingMinutes; state.optionsOpen = false; state.notice = { tone: "success", text: "已还原主页输入与基础运行选项。" }; saveState(state); render(); break;
       default: break;
     }
   };
   const handleInput = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter && event.target.tagName === "INPUT") {
+      const selectionStart = event.target.selectionStart;
+      state.dataFilters[dataFilter] = event.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const input = container.querySelector(`[data-data-filter="${dataFilter}"]`);
+        input?.focus();
+        input?.setSelectionRange?.(selectionStart, selectionStart);
+      });
+      return;
+    }
     if (event.target.dataset.profileIndex !== undefined) state.profileUrls[Number(event.target.dataset.profileIndex)] = event.target.value;
     if (event.target.matches("[data-batch-input]")) state.batchDraft = event.target.value;
     const field = event.target.dataset.field;
@@ -423,6 +473,8 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
     if (field === "pollingMinutes") state.pollingMinutes = asInteger(event.target.value, state.pollingMinutes, 1, 1440);
   };
   const handleChange = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter) { state.dataFilters[dataFilter] = event.target.value; render(); return; }
     const recordFilter = event.target.dataset.recordFilter;
     if (recordFilter) { state.recordFilters[recordFilter] = event.target.value; render(); return; }
     const field = event.target.dataset.field;

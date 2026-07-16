@@ -1,9 +1,9 @@
-import { attachDebugger, detachDebugger, evaluate, sendCommand, sleep } from "../../../background/debugger-client.js";
 import {
   GOOGLE_NEWS_READY_TIMEOUT_MS,
   GOOGLE_NEWS_VERIFICATION_COOLDOWN_MS,
   MESSAGE_GOOGLE_NEWS_CAPTURE_STATUS
 } from "./constants.js";
+import { executeTabFunction, navigateTab, sleep } from "../../../background/tab-script-client.js";
 import { extractGoogleNewsResults } from "./page-extract.js";
 import { buildGoogleNewsSearchUrl } from "./search-url.js";
 
@@ -15,6 +15,31 @@ function normalizeLimit(rawLimit) {
 const activeCaptures = new Map();
 const GOOGLE_NEWS_NO_RESULTS_PATTERN = String.raw`did not match any (?:news )?(?:documents|results)|no news results|没有找到|未找到与[\s\S]{0,200}?相关的新闻|未搜到与[\s\S]{0,200}?相关的新闻|找不到和[\s\S]{0,200}?相符|没有与[\s\S]{0,200}?(?:相符的结果|相关的新闻)`;
 const GOOGLE_NEWS_RISK_CONTROL_PATTERN = String.raw`unusual traffic|not a robot|captcha|recaptcha|验证码|人机身份|异常流量|自动程序发出`;
+
+function readGoogleNewsPageState(noResultsPattern, riskControlPattern) {
+  const text = document.body ? document.body.innerText : "";
+  const url = new URL(location.href);
+  const resultCount = document.querySelectorAll("#rso a h3, #search a h3, #rso a [role='heading'], #search a [role='heading']").length;
+  const newsContainers = document.querySelectorAll("#rso div.SoaBEf, #search div.SoaBEf, #rso div.MjjYud, #search div.MjjYud").length;
+  const hasCaptchaFrame = Boolean(document.querySelector(
+    "iframe[src*='recaptcha'], iframe[title*='reCAPTCHA'], .g-recaptcha, [data-sitekey]"
+  ));
+  const riskControl = /^\/sorry(?:\/|$)/i.test(location.pathname)
+    || hasCaptchaFrame
+    || new RegExp(riskControlPattern, "i").test(text);
+  return {
+    href: location.href,
+    pathname: location.pathname,
+    readyState: document.readyState,
+    tbm: url.searchParams.get("tbm") || "",
+    isGoogleSearchPage: /(^|\.)google\./i.test(location.hostname) && location.pathname === "/search",
+    resultCount,
+    newsContainers,
+    hasCaptchaFrame,
+    riskControl,
+    noResults: new RegExp(noResultsPattern, "i").test(text)
+  };
+}
 
 export function isGoogleNewsNoResultsText(value) {
   return new RegExp(GOOGLE_NEWS_NO_RESULTS_PATTERN, "i").test(String(value || ""));
@@ -89,28 +114,10 @@ async function waitForVerificationCooldown(session) {
 }
 
 async function getNewsPageState(tabId) {
-  return evaluate(tabId, `(() => {
-    const text = document.body ? document.body.innerText : "";
-    const url = new URL(location.href);
-    const resultCount = document.querySelectorAll("#rso a h3, #search a h3, #rso a [role='heading'], #search a [role='heading']").length;
-    const newsContainers = document.querySelectorAll("#rso div.SoaBEf, #search div.SoaBEf, #rso div.MjjYud, #search div.MjjYud").length;
-    const hasCaptchaFrame = Boolean(document.querySelector("iframe[src*='recaptcha'], .g-recaptcha, [data-sitekey]"));
-    const riskControl = /^\\/sorry(?:\\/|$)/i.test(location.pathname)
-      || hasCaptchaFrame
-      || new RegExp(${JSON.stringify(GOOGLE_NEWS_RISK_CONTROL_PATTERN)}, "i").test(text);
-    return {
-      href: location.href,
-      pathname: location.pathname,
-      readyState: document.readyState,
-      tbm: url.searchParams.get("tbm") || "",
-      isGoogleSearchPage: /(^|\\.)google\\./i.test(location.hostname) && location.pathname === "/search",
-      resultCount,
-      newsContainers,
-      hasCaptchaFrame,
-      riskControl,
-      noResults: new RegExp(${JSON.stringify(GOOGLE_NEWS_NO_RESULTS_PATTERN)}, "i").test(text)
-    };
-  })()`);
+  return executeTabFunction(tabId, readGoogleNewsPageState, [
+    GOOGLE_NEWS_NO_RESULTS_PATTERN,
+    GOOGLE_NEWS_RISK_CONTROL_PATTERN
+  ]);
 }
 
 async function waitForGoogleNews(tabId, session) {
@@ -194,24 +201,12 @@ export async function captureGoogleNews(options) {
     verificationCount: 0
   };
   activeCaptures.set(runId, session);
-  let attached = false;
   try {
     throwIfStopped(session);
-    await attachDebugger(tabId);
-    attached = true;
-    throwIfStopped(session);
-    await sendCommand(tabId, "Runtime.enable");
-    await sendCommand(tabId, "Page.enable");
-    throwIfStopped(session);
-    await sendCommand(tabId, "Page.navigate", {
-      url: buildGoogleNewsSearchUrl(query, { limit, language: options.language })
-    });
+    await navigateTab(tabId, buildGoogleNewsSearchUrl(query, { limit, language: options.language }));
     const pageState = await waitForGoogleNews(tabId, session);
     throwIfStopped(session);
-    const data = await evaluate(
-      tabId,
-      `(${extractGoogleNewsResults.toString()})(${JSON.stringify({ limit })})`
-    );
+    const data = await executeTabFunction(tabId, extractGoogleNewsResults, [{ limit }]);
     throwIfStopped(session);
     return {
       ok: true,
@@ -221,9 +216,6 @@ export async function captureGoogleNews(options) {
   } finally {
     if (activeCaptures.get(runId) === session) {
       activeCaptures.delete(runId);
-    }
-    if (attached) {
-      await detachDebugger(tabId);
     }
   }
 }
@@ -236,6 +228,5 @@ export async function stopGoogleNewsCapture(options) {
   }
 
   session.stopped = true;
-  await detachDebugger(session.tabId).catch(() => {});
   return { ok: true, stopped: true };
 }

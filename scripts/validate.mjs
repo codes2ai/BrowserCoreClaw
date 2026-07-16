@@ -28,6 +28,12 @@ if (manifest.permissions?.includes("sidePanel") || manifest.side_panel) {
 if (!manifest.permissions?.includes("tabs")) {
   throw new Error("唯一控制台标签页需要 tabs 权限。 ");
 }
+if (!manifest.permissions?.includes("scripting")) {
+  throw new Error("平台非调试采集需要 scripting 权限。 ");
+}
+if (manifest.permissions?.includes("debugger")) {
+  throw new Error("全部采集功能已迁移到 scripting，不应继续申请 debugger 权限。 ");
+}
 if (!manifest.permissions?.includes("unlimitedStorage")) {
   throw new Error("数据存储条数设为 0 时需要 unlimitedStorage 权限。 ");
 }
@@ -82,6 +88,7 @@ const taskTimeoutSource = readFileSync(join(root, "src/shared/task-timeout.js"),
 const executionIntervalSource = readFileSync(join(root, "src/shared/execution-interval.js"), "utf8");
 const inputListPaginationSource = readFileSync(join(root, "src/shared/input-list-pagination.js"), "utf8");
 const featureShellSource = readFileSync(join(root, "src/groups/feature-shell.css"), "utf8");
+const tabScriptClientSource = readFileSync(join(root, "src/background/tab-script-client.js"), "utf8");
 const appSource = readFileSync(join(root, "src/app/app.js"), "utf8");
 if (
   !runStatusSource.includes("FEATURE_RUN_STATUS_EVENT")
@@ -107,6 +114,8 @@ if (
   || !executionIntervalSource.includes("DEFAULT_EXECUTION_INTERVAL_MAX_MS = 6000")
   || !inputListPaginationSource.includes("DEFAULT_INPUT_LIST_PAGE_SIZE = 10")
   || !featureShellSource.includes(".input-list-pagination")
+  || !tabScriptClientSource.includes("chrome.scripting.executeScript")
+  || !tabScriptClientSource.includes("chrome.tabs.update")
 ) {
   throw new Error("全局基础、Limit、存储设置或任务超时控制没有完整接入。 ");
 }
@@ -254,6 +263,94 @@ if (
   || !inputPaginationHtml.includes('aria-current="page"')
 ) {
   throw new Error("输入列表分页控件没有正确展示范围、页码和导航操作。 ");
+}
+const dataTableFilterModule = await import(pathToFileURL(join(
+  root,
+  "src/shared/data-table-filter.js"
+)).href);
+const dataFilterDefinitions = [
+  { key: "keyword", label: "关键词", type: "select" },
+  { key: "title", label: "标题" },
+  { key: "author", label: "作者", keys: ["author", "source"] }
+];
+const dataFilterRows = [
+  { keyword: "OpenAI", title: "模型发布", author: "甲" },
+  { keyword: "OpenAI", title: "行业观察", source: "乙" },
+  { keyword: "人工智能", title: "模型观察", author: "丙" }
+];
+const dataFilterValues = dataTableFilterModule.createDataFilterValues(dataFilterDefinitions);
+dataFilterValues.keyword = "OpenAI";
+dataFilterValues.title = "模型";
+const filteredDataRows = dataTableFilterModule.filterDataRows(
+  dataFilterRows,
+  dataFilterDefinitions,
+  dataFilterValues
+);
+if (
+  filteredDataRows.length !== 1
+  || filteredDataRows[0].author !== "甲"
+  || dataTableFilterModule.countActiveDataFilters(dataFilterDefinitions, dataFilterValues) !== 2
+) {
+  throw new Error("数据表格的文本包含筛选、下拉精确筛选或启用数量统计不正确。 ");
+}
+const dataFilterMarkup = dataTableFilterModule.renderDataFilterPanel({
+  rows: dataFilterRows,
+  definitions: dataFilterDefinitions,
+  values: dataFilterValues,
+  expanded: true,
+  escapeHtml: (value) => String(value)
+});
+if (
+  !dataFilterMarkup.includes('data-action="toggle-data-filters"')
+  || !dataFilterMarkup.includes('data-action="clear-data-filters"')
+  || !dataFilterMarkup.includes("显示 1 / 3 条")
+) {
+  throw new Error("数据筛选面板缺少收起、清空或筛选结果统计。 ");
+}
+const copiedJsonFixture = dataTableFilterModule.serializeRowsAsJson(filteredDataRows, (rows) => (
+  rows.map((row) => ({ keyword: row.keyword, title: row.title }))
+));
+if (!copiedJsonFixture.includes('"title": "模型发布"') || copiedJsonFixture.includes('"author"')) {
+  throw new Error("复制 JSON 没有使用筛选后的数据或规范化导出字段。 ");
+}
+const dataFilterSource = readFileSync(join(root, "src/shared/data-table-filter.js"), "utf8");
+if (
+  !dataFilterSource.includes("openRowsJsonPreview")
+  || !dataFilterSource.includes("data-json-preview")
+  || !dataFilterSource.includes("data-json-copy")
+  || !dataFilterSource.includes("一键复制")
+) {
+  throw new Error("JSON 数据预览弹窗或一键复制能力不完整。 ");
+}
+
+const directDataFilterMonitors = [
+  "src/groups/google/google-news/monitor.js",
+  "src/groups/xiaohongshu/keyword-search/monitor.js",
+  "src/groups/xiaohongshu/profile-notes/monitor.js",
+  "src/groups/xiaohongshu/profile-info/monitor.js",
+  "src/groups/weibo/profile-monitor.js"
+];
+for (const relativePath of directDataFilterMonitors) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  if (
+    !source.includes("renderDataFilterPanel")
+    || !source.includes("filterDataRows")
+    || !source.includes('data-action="copy-json"')
+    || !source.includes("openRowsJsonPreview")
+    || !source.includes("筛选后的表格数据")
+    || source.includes('data-action="export-json"')
+  ) {
+    throw new Error(`数据筛选、复制 JSON 或筛选后表格导出没有完整接入：${relativePath}`);
+  }
+}
+for (const platform of ["weibo", "douyin"]) {
+  for (const feature of ["profile-posts", "profile-info", "post-detail"]) {
+    const relativePath = `src/groups/${platform}/${feature}/monitor.js`;
+    const source = readFileSync(join(root, relativePath), "utf8");
+    if (!source.includes("dataFilters:") || !source.includes("buildExportRows:") || !source.includes("emptyDataText:")) {
+      throw new Error(`配置化数据筛选字段或复制 JSON 映射没有完整接入：${relativePath}`);
+    }
+  }
 }
 const sharedDateModule = await import(pathToFileURL(join(root, "src/shared/date-normalizer.js")).href);
 const googleDateReference = new Date(2026, 6, 15, 0, 15, 0);
@@ -628,8 +725,9 @@ const xiaohongshuProfileBackgroundSource = readFileSync(join(
 ), "utf8");
 if (!/waitForProfilePage/.test(xiaohongshuProfileBackgroundSource)
   || !/collectProfileData/.test(xiaohongshuProfileBackgroundSource)
-  || !/window\.scrollTo/.test(xiaohongshuProfileBackgroundSource)
-  || !/Page\.navigate/.test(xiaohongshuProfileBackgroundSource)) {
+  || !/scrollPageToBottom/.test(xiaohongshuProfileBackgroundSource)
+  || !/executeTabFunction/.test(xiaohongshuProfileBackgroundSource)
+  || !/navigateTab/.test(xiaohongshuProfileBackgroundSource)) {
   throw new Error("博主主页采集缺少页面稳定等待、滚动加载或跳转链路。");
 }
 const xiaohongshuProfilePageSource = readFileSync(join(
@@ -660,7 +758,8 @@ const xiaohongshuProfileInfoBackgroundSource = readFileSync(join(
   "src/groups/xiaohongshu/profile-info/background.js"
 ), "utf8");
 if (!/waitForProfileInfo/.test(xiaohongshuProfileInfoBackgroundSource)
-  || !/Page\.navigate/.test(xiaohongshuProfileInfoBackgroundSource)
+  || !/navigateTab/.test(xiaohongshuProfileInfoBackgroundSource)
+  || !/executeTabFunction/.test(xiaohongshuProfileInfoBackgroundSource)
   || !/captureXiaohongshuProfileInfo/.test(xiaohongshuProfileInfoBackgroundSource)) {
   throw new Error("博主信息采集缺少页面稳定等待或导航链路。");
 }
@@ -784,6 +883,20 @@ for (const relativePath of targetTabCleanupFiles) {
     throw new Error(`${relativePath} 没有按成功/停止关闭、异常保留的采集标签页清理策略运行。`);
   }
 }
+const nonDebuggerCaptureFiles = [
+  "src/groups/google/google-news/background.js",
+  ...targetTabCleanupFiles
+];
+for (const relativePath of nonDebuggerCaptureFiles) {
+  const source = readFileSync(join(root, relativePath), "utf8");
+  if (
+    !source.includes("executeTabFunction")
+    || !source.includes("navigateTab")
+    || /debugger-client|attachDebugger|detachDebugger|chrome\.debugger|sendCommand\(|Runtime\.evaluate|Page\.navigate/.test(source)
+  ) {
+    throw new Error(`${relativePath} 仍包含调试协议调用或没有接入统一页面脚本客户端。`);
+  }
+}
 const googleMonitorCleanupSource = readFileSync(join(root, "src/groups/google/google-news/monitor.js"), "utf8");
 const googleBackgroundCleanupSource = readFileSync(join(root, "src/groups/google/google-news/background.js"), "utf8");
 if (
@@ -803,9 +916,11 @@ if (
   || !googleBackgroundCleanupSource.includes('notifyCaptureStatus(session, "verification_passed"')
   || !googleBackgroundCleanupSource.includes('notifyCaptureStatus(session, "capture_resumed"')
   || !googleBackgroundCleanupSource.includes("focusVerificationTab")
+  || !googleBackgroundCleanupSource.includes("executeTabFunction")
+  || !googleBackgroundCleanupSource.includes("navigateTab")
   || !serviceWorkerSource.includes("errorCode: error.code")
 ) {
-  throw new Error("Google 新闻监控没有完整处理无数据、人工验证恢复或采集标签页清理。 ");
+  throw new Error("Google 新闻监控没有完整使用非调试采集、人工验证恢复或采集标签页清理。 ");
 }
 
 const persistentFeatureRuns = [

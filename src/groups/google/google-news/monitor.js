@@ -3,7 +3,7 @@ import {
   MESSAGE_GOOGLE_NEWS_CAPTURE_STATUS,
   MESSAGE_STOP_GOOGLE_NEWS
 } from "./constants.js";
-import { downloadGoogleNewsData } from "./export-data.js";
+import { buildGoogleNewsExportRows, downloadGoogleNewsData } from "./export-data.js";
 import { buildGoogleNewsSearchUrl } from "./search-url.js";
 import {
   getTaskRecordDetails,
@@ -38,10 +38,25 @@ import {
   paginateInputList,
   renderInputListPagination
 } from "../../../shared/input-list-pagination.js";
+import {
+  createDataFilterValues,
+  filterDataRows,
+  openRowsJsonPreview,
+  renderDataFilterPanel
+} from "../../../shared/data-table-filter.js";
 
 const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
 const FEATURE_KEY = "google/google-news";
 const ALL_RECORD_FILTER = "__all__";
+const DATA_FILTER_DEFINITIONS = Object.freeze([
+  { key: "keyword", label: "关键词", type: "select" },
+  { key: "title", label: "新闻标题" },
+  { key: "description", label: "描述", keys: ["description", "desc"] },
+  { key: "source", label: "来源", type: "select" },
+  { key: "publishedAt", label: "发布时间", placeholder: "例如 2026-07-15" },
+  { key: "collectedAt", label: "采集时间", placeholder: "例如 2026-07-16" },
+  { key: "url", label: "链接" }
+]);
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
   success: { label: "完成", tone: "success" },
@@ -638,16 +653,18 @@ function renderTaskDetails(state) {
 }
 
 function renderData(state) {
+  const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
   return `
     <section class="news-content-card news-table-page">
       <div class="news-panel-head">
         <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；发布时间和采集时间统一为 YYYY-MM-DD HH:mm:ss。</p></div>
       </div>
+      ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="news-table-shell data" tabindex="0" aria-label="可滚动的 Google 新闻采集数据表格">
         <table class="news-table news-data-table">
           <thead><tr><th>关键词</th><th>新闻标题</th><th>描述</th><th>来源</th><th>发布时间</th><th>采集时间</th><th>链接</th></tr></thead>
           <tbody>
-            ${state.dataRows.length ? state.dataRows.map((row) => `
+            ${filteredRows.length ? filteredRows.map((row) => `
               <tr>
                 <td>${escapeHtml(row.keyword)}</td>
                 <td class="news-title-cell" title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</td>
@@ -657,7 +674,7 @@ function renderData(state) {
                 <td>${escapeHtml(row.collectedAt || "-")}</td>
                 <td><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a></td>
               </tr>
-            `).join("") : `<tr><td class="news-table-empty" colspan="7">运行后，Google 新闻结果会显示在这里</td></tr>`}
+            `).join("") : `<tr><td class="news-table-empty" colspan="7">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，Google 新闻结果会显示在这里"}</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -723,12 +740,13 @@ function renderActionBar(state) {
     `;
   }
   if (state.tab === "data") {
+    const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
     return `
       <footer class="news-action-bar news-table-action-bar">
-        <button class="news-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button>
-        <button class="news-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button>
+        <button class="news-secondary-button emphasized" type="button" data-action="copy-json" ${filteredRows.length ? "" : "disabled"}>复制 JSON</button>
+        <button class="news-secondary-button emphasized" type="button" data-action="export-csv" ${filteredRows.length ? "" : "disabled"}>导出表格</button>
         <button class="news-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length ? "" : "disabled"}>清空数据</button>
-        <span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span>
+        <span>筛选结果 ${filteredRows.length} / ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span>
       </footer>
     `;
   }
@@ -854,6 +872,8 @@ export async function mountGoogleNewsMonitor(container, context) {
     stopping: Boolean(activeGoogleNewsRun?.stopRequested),
     verificationPending: Boolean(activeGoogleNewsRun?.verificationPending),
     recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
+    dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS),
+    dataFiltersOpen: true,
     notice: saved?.notice || (!isExtensionRuntime()
       ? { tone: "info", text: "当前是网页预览：运行会打开 Google 新闻搜索页；数据采集请在 Chrome 中加载扩展后测试。" }
       : null),
@@ -1393,7 +1413,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     render();
   };
 
-  const handleClick = (event) => {
+  const handleClick = async (event) => {
     if (event.target.matches(".news-modal-backdrop")) {
       if (state.taskDetailRecordId) closeTaskDetails();
       else if (state.guideOpen) closeGuide();
@@ -1507,6 +1527,16 @@ export async function mountGoogleNewsMonitor(container, context) {
       render();
       return;
     }
+    if (action === "toggle-data-filters") {
+      state.dataFiltersOpen = !state.dataFiltersOpen;
+      render();
+      return;
+    }
+    if (action === "clear-data-filters") {
+      state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS);
+      render();
+      return;
+    }
     if (action === "apply-json") {
       applyJsonDraft();
       render();
@@ -1520,20 +1550,26 @@ export async function mountGoogleNewsMonitor(container, context) {
       render();
       return;
     }
-    if (action === "export-json") {
-      downloadGoogleNewsData(state.dataRows, "json");
-      state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` };
-      render();
+    if (action === "copy-json") {
+      const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+      try {
+        openRowsJsonPreview(rows, buildGoogleNewsExportRows);
+      } catch (error) {
+        state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
+        render();
+      }
       return;
     }
     if (action === "export-csv") {
-      downloadGoogleNewsData(state.dataRows, "csv");
-      state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` };
+      const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+      downloadGoogleNewsData(rows, "csv");
+      state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
       render();
       return;
     }
     if (action === "clear-data") {
       state.dataRows = [];
+      state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS);
       saveState(state);
       render();
       return;
@@ -1550,6 +1586,18 @@ export async function mountGoogleNewsMonitor(container, context) {
   };
 
   const handleInput = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter && event.target.tagName === "INPUT") {
+      const selectionStart = event.target.selectionStart;
+      state.dataFilters[dataFilter] = event.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const input = container.querySelector(`[data-data-filter="${dataFilter}"]`);
+        input?.focus();
+        input?.setSelectionRange?.(selectionStart, selectionStart);
+      });
+      return;
+    }
     const keywordIndex = event.target.dataset.keywordIndex;
     if (keywordIndex !== undefined) {
       state.config.keywords[Number(keywordIndex)] = event.target.value;
@@ -1572,6 +1620,12 @@ export async function mountGoogleNewsMonitor(container, context) {
   };
 
   const handleChange = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter) {
+      state.dataFilters[dataFilter] = event.target.value;
+      render();
+      return;
+    }
     const recordFilter = event.target.dataset.recordFilter;
     if (recordFilter) {
       state.recordFilters[recordFilter] = event.target.value;

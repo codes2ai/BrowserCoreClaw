@@ -1,5 +1,5 @@
 // This function is serialized and executed in the target Weibo page through
-// the Chrome DevTools protocol. Keep it self-contained: no imported helpers.
+// chrome.scripting. Keep it self-contained: no imported helpers.
 export async function runWeiboPageCommand(command, options = {}) {
   const normalText = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const isVisible = (element) => {

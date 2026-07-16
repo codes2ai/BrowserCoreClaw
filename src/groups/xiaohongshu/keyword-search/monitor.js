@@ -1,4 +1,4 @@
-import { downloadXiaohongshuKeywordData } from "./export-data.js";
+import { buildXiaohongshuKeywordExportRows, downloadXiaohongshuKeywordData } from "./export-data.js";
 import {
   MESSAGE_CAPTURE_XIAOHONGSHU_KEYWORD,
   MESSAGE_STOP_XIAOHONGSHU_KEYWORD
@@ -42,10 +42,26 @@ import {
   paginateInputList,
   renderInputListPagination
 } from "../../../shared/input-list-pagination.js";
+import {
+  createDataFilterValues,
+  filterDataRows,
+  openRowsJsonPreview,
+  renderDataFilterPanel
+} from "../../../shared/data-table-filter.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuKeywordV1";
 const FEATURE_KEY = "xiaohongshu/keyword-search";
 const ALL_RECORD_FILTER = "__all__";
+const DATA_FILTER_DEFINITIONS = Object.freeze([
+  { key: "pageOrder", label: "顺序" },
+  { key: "keyword", label: "关键词", type: "select" },
+  { key: "title", label: "笔记标题", keys: ["title", "noteTitle"] },
+  { key: "description", label: "笔记正文", keys: ["description", "noteContent", "desc"] },
+  { key: "author", label: "作者", type: "select", keys: ["author", "source"] },
+  { key: "publishedAt", label: "发布时间", keys: ["publishedAt", "time"], placeholder: "例如 2025-11-18" },
+  { key: "likes", label: "点赞" },
+  { key: "url", label: "链接" }
+]);
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
   success: { label: "完成", tone: "success" },
@@ -571,16 +587,18 @@ function renderTaskDetails(state) {
 }
 
 function renderData(state) {
+  const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
   return `
     <section class="xhs-content-card xhs-table-page">
       <div class="xhs-panel-head">
         <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每次搜索结果均按页面卡片的原始顺序保存。</p></div>
       </div>
+      ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的 小红书笔记采集数据表格">
         <table class="xhs-table xhs-data-table">
           <thead><tr><th>顺序</th><th>封面</th><th>关键词</th><th>笔记标题</th><th>笔记正文</th><th>作者</th><th>发布时间</th><th>点赞</th><th>链接</th></tr></thead>
           <tbody>
-            ${state.dataRows.length ? state.dataRows.map((row) => `
+            ${filteredRows.length ? filteredRows.map((row) => `
               <tr>
                 <td>${row.pageOrder || "-"}</td>
                 <td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td>
@@ -592,7 +610,7 @@ function renderData(state) {
                 <td>${escapeHtml(row.likes || "-")}</td>
                 <td><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a></td>
               </tr>
-            `).join("") : `<tr><td class="xhs-table-empty" colspan="9">运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里</td></tr>`}
+            `).join("") : `<tr><td class="xhs-table-empty" colspan="9">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里"}</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -658,12 +676,13 @@ function renderActionBar(state) {
     `;
   }
   if (state.tab === "data") {
+    const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
     return `
       <footer class="xhs-action-bar xhs-table-action-bar">
-        <button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button>
-        <button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button>
+        <button class="xhs-secondary-button emphasized" type="button" data-action="copy-json" ${filteredRows.length ? "" : "disabled"}>复制 JSON</button>
+        <button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${filteredRows.length ? "" : "disabled"}>导出表格</button>
         <button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length ? "" : "disabled"}>清空数据</button>
-        <span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span>
+        <span>筛选结果 ${filteredRows.length} / ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span>
       </footer>
     `;
   }
@@ -781,6 +800,8 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     running: Boolean(activeXiaohongshuKeywordRun),
     stopping: Boolean(activeXiaohongshuKeywordRun?.stopRequested),
     recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
+    dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS),
+    dataFiltersOpen: true,
     notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。设置筛选条件后点击运行，扩展会按页面顺序采集搜索结果。" },
     dataStorageLimit: storageLimits.dataStorageLimit,
     taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit,
@@ -1073,7 +1094,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     render();
   };
 
-  const handleClick = (event) => {
+  const handleClick = async (event) => {
     if (event.target.matches(".xhs-modal-backdrop")) {
       if (state.taskDetailRecordId) closeTaskDetails();
       else if (state.guideOpen) closeGuide();
@@ -1187,6 +1208,16 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       render();
       return;
     }
+    if (action === "toggle-data-filters") {
+      state.dataFiltersOpen = !state.dataFiltersOpen;
+      render();
+      return;
+    }
+    if (action === "clear-data-filters") {
+      state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS);
+      render();
+      return;
+    }
     if (action === "apply-json") {
       applyJsonDraft();
       render();
@@ -1200,20 +1231,26 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       render();
       return;
     }
-    if (action === "export-json") {
-      downloadXiaohongshuKeywordData(state.dataRows, "json");
-      state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` };
-      render();
+    if (action === "copy-json") {
+      const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+      try {
+        openRowsJsonPreview(rows, buildXiaohongshuKeywordExportRows);
+      } catch (error) {
+        state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
+        render();
+      }
       return;
     }
     if (action === "export-csv") {
-      downloadXiaohongshuKeywordData(state.dataRows, "csv");
-      state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` };
+      const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+      downloadXiaohongshuKeywordData(rows, "csv");
+      state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
       render();
       return;
     }
     if (action === "clear-data") {
       state.dataRows = [];
+      state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS);
       saveState(state);
       render();
       return;
@@ -1230,6 +1267,18 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   };
 
   const handleInput = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter && event.target.tagName === "INPUT") {
+      const selectionStart = event.target.selectionStart;
+      state.dataFilters[dataFilter] = event.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const input = container.querySelector(`[data-data-filter="${dataFilter}"]`);
+        input?.focus();
+        input?.setSelectionRange?.(selectionStart, selectionStart);
+      });
+      return;
+    }
     const keywordIndex = event.target.dataset.keywordIndex;
     if (keywordIndex !== undefined) {
       state.config.keywords[Number(keywordIndex)] = event.target.value;
@@ -1252,6 +1301,12 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   };
 
   const handleChange = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter) {
+      state.dataFilters[dataFilter] = event.target.value;
+      render();
+      return;
+    }
     const recordFilter = event.target.dataset.recordFilter;
     if (recordFilter) {
       state.recordFilters[recordFilter] = event.target.value;

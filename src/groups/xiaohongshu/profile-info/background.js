@@ -1,4 +1,4 @@
-import { attachDebugger, detachDebugger, evaluate, sendCommand, sleep } from "../../../background/debugger-client.js";
+import { executeTabFunction, navigateTab, sleep } from "../../../background/tab-script-client.js";
 import {
   XIAOHONGSHU_HOME_URL,
   XIAOHONGSHU_PROFILE_INFO_READY_TIMEOUT_MS,
@@ -61,7 +61,7 @@ function throwIfStopped(session) {
 }
 
 async function getPageState(tabId) {
-  return evaluate(tabId, `(${runXiaohongshuProfileInfoPageCommand.toString()})("inspect")`);
+  return executeTabFunction(tabId, runXiaohongshuProfileInfoPageCommand, ["inspect"]);
 }
 
 async function waitForProfileInfo(tabId, session) {
@@ -124,25 +124,19 @@ export async function captureXiaohongshuProfileInfo(options) {
 
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
-  let attached = false;
   let completed = false;
   try {
     if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
-    await attachDebugger(tab.id);
-    attached = true;
-    await sendCommand(tab.id, "Runtime.enable");
-    await sendCommand(tab.id, "Page.enable");
     throwIfStopped(session);
-    await sendCommand(tab.id, "Page.navigate", { url: profileUrl });
+    await navigateTab(tab.id, profileUrl);
     await waitForProfileInfo(tab.id, session);
     throwIfStopped(session);
-    const data = await evaluate(tab.id, `(${runXiaohongshuProfileInfoPageCommand.toString()})("extract")`);
+    const data = await executeTabFunction(tab.id, runXiaohongshuProfileInfoPageCommand, ["extract"]);
     if (!data?.profile?.profileId && !data?.profile?.nickname) throw new Error("未读取到博主资料，请确认主页可访问。");
     completed = true;
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
-    if (attached) await detachDebugger(tab.id).catch(() => {});
     if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
@@ -151,6 +145,5 @@ export async function stopXiaohongshuProfileInfoCapture(options) {
   const session = activeCaptures.get(String(options.runId || "").trim());
   if (!session) return { ok: true, stopped: false };
   session.stopped = true;
-  await detachDebugger(session.tabId).catch(() => {});
   return { ok: true, stopped: true };
 }

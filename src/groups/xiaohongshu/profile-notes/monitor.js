@@ -1,4 +1,5 @@
 import {
+  buildXiaohongshuProfileExportRows,
   downloadXiaohongshuProfileData
 } from "./export-data.js";
 import {
@@ -37,10 +38,25 @@ import {
   paginateInputList,
   renderInputListPagination
 } from "../../../shared/input-list-pagination.js";
+import {
+  createDataFilterValues,
+  filterDataRows,
+  openRowsJsonPreview,
+  renderDataFilterPanel
+} from "../../../shared/data-table-filter.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileV1";
 const FEATURE_KEY = "xiaohongshu/profile-notes";
 const ALL_RECORD_FILTER = "__all__";
+const DATA_FILTER_DEFINITIONS = Object.freeze([
+  { key: "pageOrder", label: "顺序" },
+  { key: "noteId", label: "博文 ID" },
+  { key: "noteTitle", label: "博文标题" },
+  { key: "noteAuthor", label: "作者", type: "select" },
+  { key: "noteLikes", label: "点赞" },
+  { key: "noteUrl", label: "博文链接" },
+  { key: "capturedAt", label: "采集时间", placeholder: "例如 2025-11-18" }
+]);
 const DEFAULT_PROFILE_URLS = [""];
 const DEFAULT_OPTIONS = Object.freeze({
   limit: 20,
@@ -392,18 +408,20 @@ function renderRecords(state) {
 }
 
 function renderData(state) {
+  const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
   return `
     <section class="xhs-content-card xhs-table-page">
       <div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；博文按主页卡片原始顺序保存。</p></div></div>
+      ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的博文数据表格">
         <table class="xhs-table xhs-data-table">
           <thead><tr><th>顺序</th><th>博文 ID</th><th>博文标题</th><th>作者</th><th>点赞</th><th>博文链接</th><th>封面</th><th>采集时间</th></tr></thead>
-          <tbody>${state.dataRows.length ? state.dataRows.map((row) => `
+          <tbody>${filteredRows.length ? filteredRows.map((row) => `
             <tr>
               <td>${row.pageOrder || "-"}</td><td>${escapeHtml(row.noteId || "-")}</td><td class="xhs-title-cell" title="${escapeHtml(row.noteTitle || "")}">${escapeHtml(row.noteTitle || "-")}</td><td>${escapeHtml(row.noteAuthor || "-")}</td><td>${escapeHtml(row.noteLikes || "-")}</td>
               <td>${row.noteUrl ? `<a href="${escapeHtml(row.noteUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${row.noteCover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.noteCover)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td>
             </tr>
-          `).join("") : `<tr><td class="xhs-table-empty" colspan="8">运行后，主页博文卡片会显示在这里</td></tr>`}</tbody>
+          `).join("") : `<tr><td class="xhs-table-empty" colspan="8">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，主页博文卡片会显示在这里"}</td></tr>`}</tbody>
         </table>
       </div>
     </section>
@@ -430,7 +448,7 @@ function renderGuide(state) {
       <div class="xhs-guide"><p class="xhs-guide-intro">功能会复用当前 Chrome Profile 的小红书登录会话，按主页链接采集主页博文卡片。</p><ol>
         <li><strong>确认登录</strong><span>进入功能前会确认当前 Chrome Profile 的小红书登录状态。</span></li>
         <li><strong>填写主页</strong><span>输入一个或多个 <code>/user/profile/</code> 主页链接。</span></li>
-        <li><strong>运行并导出</strong><span>程序会等待页面稳定、滚动补齐笔记并去重，数据页可导出 JSON 或 CSV 表格。</span></li>
+        <li><strong>运行并导出</strong><span>程序会等待页面稳定、滚动补齐笔记并去重，数据页支持筛选、复制 JSON 和导出 CSV 表格。</span></li>
       </ol><div class="xhs-schema-box"><strong>采集字段</strong><code>pageOrder · noteId · noteTitle · noteAuthor · noteLikes · noteUrl · noteCover · collectedAt</code></div></div>
       <footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer>
     </section></div>
@@ -462,8 +480,9 @@ function renderActionBar(state) {
   if (state.tab === "records") return `
     <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>
   `;
+  const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
   return `
-    <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>
+    <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="copy-json" ${filteredRows.length ? "" : "disabled"}>复制 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${filteredRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>筛选结果 ${filteredRows.length} / ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>
   `;
 }
 
@@ -543,6 +562,8 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     running: Boolean(activeProfileRun && !activeProfileRun.stopRequested),
     stopping: false,
     recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
+    dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS),
+    dataFiltersOpen: true,
     notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集主页博文。" }
   };
   saveState(state);
@@ -751,7 +772,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     render();
   };
 
-  const handleClick = (event) => {
+  const handleClick = async (event) => {
     if (event.target.matches(".xhs-modal-backdrop")) {
       if (state.taskDetailRecordId) closeTaskDetails();
       else if (state.guideOpen) { state.guideOpen = false; render(); }
@@ -766,6 +787,8 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       case "run": startRun().catch((error) => { state.running = false; state.stopping = false; activeRun = null; activeProfileRun = null; state.notice = { tone: "error", text: error.message || String(error) }; render(); }); break;
       case "stop": stopRun().catch((error) => { state.notice = { tone: "error", text: `停止任务失败：${error.message || String(error)}` }; render(); }); break;
       case "toggle-options": state.optionsOpen = !state.optionsOpen; render(); break;
+      case "toggle-data-filters": state.dataFiltersOpen = !state.dataFiltersOpen; render(); break;
+      case "clear-data-filters": state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS); render(); break;
       case "set-input-list-page": state.inputListPage = clampInputListPage(button.dataset.page, state.profileUrls); render(); break;
       case "add-profile": state.profileUrls.push(""); state.inputListPage = pageForInputIndex(state.profileUrls.length - 1); render(); requestAnimationFrame(() => container.querySelector(`[data-profile-index="${state.profileUrls.length - 1}"]`)?.focus()); break;
       case "remove-profile": state.profileUrls.splice(Number(button.dataset.index), 1); state.inputListPage = clampInputListPage(state.inputListPage, state.profileUrls); saveState(state); render(); break;
@@ -787,9 +810,24 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       case "open-task-detail": openTaskDetails(button.dataset.recordId); break;
       case "close-task-detail": closeTaskDetails(); break;
       case "clear-records": state.records = []; state.recordFilters = { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }; state.taskDetailRecordId = ""; saveState(state); render(); break;
-      case "clear-data": state.dataRows = []; saveState(state); render(); break;
-      case "export-json": downloadXiaohongshuProfileData(state.dataRows, "json"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` }; render(); break;
-      case "export-csv": downloadXiaohongshuProfileData(state.dataRows, "csv"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` }; render(); break;
+      case "clear-data": state.dataRows = []; state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS); saveState(state); render(); break;
+      case "copy-json": {
+        const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+        try {
+          openRowsJsonPreview(rows, buildXiaohongshuProfileExportRows);
+        } catch (error) {
+          state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
+          render();
+        }
+        break;
+      }
+      case "export-csv": {
+        const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+        downloadXiaohongshuProfileData(rows, "csv");
+        state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
+        render();
+        break;
+      }
       case "reset":
         state.profileUrls = [...DEFAULT_PROFILE_URLS];
         state.inputListPage = 1;
@@ -809,6 +847,18 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
   };
 
   const handleInput = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter && event.target.tagName === "INPUT") {
+      const selectionStart = event.target.selectionStart;
+      state.dataFilters[dataFilter] = event.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const input = container.querySelector(`[data-data-filter="${dataFilter}"]`);
+        input?.focus();
+        input?.setSelectionRange?.(selectionStart, selectionStart);
+      });
+      return;
+    }
     if (event.target.dataset.profileIndex !== undefined) state.profileUrls[Number(event.target.dataset.profileIndex)] = event.target.value;
     if (event.target.matches("[data-batch-input]")) state.batchDraft = event.target.value;
     const field = event.target.dataset.field;
@@ -819,6 +869,8 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     if (field === "pollingMinutes") state.pollingMinutes = asInteger(event.target.value, state.pollingMinutes, 1, 1440);
   };
   const handleChange = (event) => {
+    const dataFilter = event.target.dataset.dataFilter;
+    if (dataFilter) { state.dataFilters[dataFilter] = event.target.value; render(); return; }
     const recordFilter = event.target.dataset.recordFilter;
     if (recordFilter) { state.recordFilters[recordFilter] = event.target.value; render(); return; }
     const field = event.target.dataset.field;

@@ -30,6 +30,12 @@ import {
   paginateInputList,
   renderInputListPagination
 } from "../../shared/input-list-pagination.js";
+import {
+  createDataFilterValues,
+  filterDataRows,
+  openRowsJsonPreview,
+  renderDataFilterPanel
+} from "../../shared/data-table-filter.js";
 
 const ALL_RECORD_FILTER = "__all__";
 const STATUS = Object.freeze({
@@ -100,6 +106,8 @@ export function createWeiboProfileMonitor(settings) {
   const inputPlaceholder = settings.inputPlaceholder || "https://weibo.com/u/数字ID";
   const validTargetUrl = settings.validateTargetUrl || isWeiboProfileUrl;
   const targetOptionKey = settings.targetOptionKey || "profileUrl";
+  const dataFilterDefinitions = Object.freeze(Array.isArray(settings.dataFilters) ? [...settings.dataFilters] : []);
+  const buildExportRows = typeof settings.buildExportRows === "function" ? settings.buildExportRows : (rows) => rows;
 
   const loadSavedState = async () => {
     if (!isExtensionRuntime() || !chrome.storage?.local) return null;
@@ -161,14 +169,19 @@ export function createWeiboProfileMonitor(settings) {
     const profiles = Array.from(new Set(state.records.map((record) => record.keyword).filter(Boolean)));
     return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>运行记录</h2><p>每个${escapeHtml(subjectLabel)}独立记录；每一种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}。</p></div></div><div class="xhs-record-filters"><label class="xhs-filter-control"><span>${escapeHtml(subjectLabel)}</span><select data-record-filter="profile"><option value="${ALL_RECORD_FILTER}">全部${escapeHtml(subjectLabel)}</option>${profiles.map((url) => `<option value="${escapeHtml(url)}" ${state.recordFilters.profile === url ? "selected" : ""}>${escapeHtml(url)}</option>`).join("")}</select></label><label class="xhs-filter-control"><span>状态</span><select data-record-filter="status"><option value="${ALL_RECORD_FILTER}">全部状态</option>${Object.entries(STATUS).map(([key, meta]) => `<option value="${key}" ${state.recordFilters.status === key ? "selected" : ""}>${meta.label}</option>`).join("")}</select></label><span class="xhs-filter-result">显示 ${records.length} / ${state.records.length} 条</span></div><div class="xhs-table-shell records" tabindex="0"><table class="xhs-table"><thead><tr><th>任务编号</th><th>开始时间</th><th>${escapeHtml(subjectLabel)}</th><th>轮次</th><th>状态</th><th>${rowLabel}数</th><th>耗时</th></tr></thead><tbody>${records.length ? records.map((record) => `<tr><td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}"><code>${escapeHtml(getTaskId(record))}</code></button></td><td>${escapeHtml(record.startedAt)}</td><td class="xhs-profile-url-cell" title="${escapeHtml(record.keyword)}">${escapeHtml(record.keyword)}</td><td>${escapeHtml(record.round)}</td><td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${escapeHtml(record.duration)}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody></table></div></section>`;
   };
-  const renderData = (state) => `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；${settings.dataSummary}</p></div></div><div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table">${settings.renderDataTable(state.dataRows, escapeHtml)}</table></div></section>`;
+  const renderData = (state) => {
+    const filteredRows = filterDataRows(state.dataRows, dataFilterDefinitions, state.dataFilters);
+    const emptyText = state.dataRows.length ? "没有符合筛选条件的数据" : settings.emptyDataText;
+    return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；${settings.dataSummary}</p></div></div>${renderDataFilterPanel({ rows: state.dataRows, definitions: dataFilterDefinitions, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}<div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table">${settings.renderDataTable(filteredRows, escapeHtml, { emptyText })}</table></div></section>`;
+  };
   const renderBatch = (state) => state.batchOpen ? `<div class="xhs-modal-backdrop" data-modal="batch"><section class="xhs-batch-modal" role="dialog" aria-modal="true" aria-labelledby="weiboBatchTitle"><header><div><span>BATCH EDIT</span><h2 id="weiboBatchTitle">批量编辑${escapeHtml(subjectLabel)}</h2></div><button class="xhs-modal-close" type="button" data-action="close-batch" aria-label="关闭">X</button></header><p>${settings.batchDescription || `每行一个${subjectLabel}链接（<code>${escapeHtml(inputPlaceholder)}</code>）；应用后会替换当前列表。`}</p><textarea data-batch-input rows="10">${escapeHtml(state.batchDraft)}</textarea><footer><button class="xhs-secondary-button" type="button" data-action="close-batch">取消</button><button class="xhs-primary-button" type="button" data-action="apply-batch">应用链接</button></footer></section></div>` : "";
-  const renderGuide = (state) => state.guideOpen ? `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="profileGuideTitle"><header><div><span>QUICK START</span><h2 id="profileGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">${settings.guideIntro}</p><ol><li><strong>填写${escapeHtml(subjectLabel)}</strong><span>${settings.guideInputText || `输入一个或多个${platformName}${subjectLabel}链接。`}</span></li><li><strong>等待稳定</strong><span>${settings.guideWaitText || "程序会打开链接，连续确认页面数据稳定后才开始读取。"}</span></li><li><strong>查看与导出</strong><span>每个${escapeHtml(subjectLabel)}会生成一条运行记录；数据支持 JSON 和 CSV 导出。</span></li></ol><div class="xhs-schema-box"><strong>采集字段</strong><code>${settings.fieldList}</code></div></div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>` : "";
+  const renderGuide = (state) => state.guideOpen ? `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="profileGuideTitle"><header><div><span>QUICK START</span><h2 id="profileGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">${settings.guideIntro}</p><ol><li><strong>填写${escapeHtml(subjectLabel)}</strong><span>${settings.guideInputText || `输入一个或多个${platformName}${subjectLabel}链接。`}</span></li><li><strong>等待稳定</strong><span>${settings.guideWaitText || "程序会打开链接，连续确认页面数据稳定后才开始读取。"}</span></li><li><strong>查看与导出</strong><span>每个${escapeHtml(subjectLabel)}会生成一条运行记录；数据支持筛选、复制 JSON 和导出 CSV 表格。</span></li></ol><div class="xhs-schema-box"><strong>采集字段</strong><code>${settings.fieldList}</code></div></div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>` : "";
   const renderTask = (state) => state.taskDetailRecordId ? renderTaskDetailModal({ detail: getTaskRecordDetails(state.records, state.taskDetailRecordId), prefix: "xhs", featureName: settings.featureName, detailTitle: `${settings.featureName}任务明细`, subjectLabel, escapeHtml, renderStatus }) : "";
   const renderAction = (state) => {
     if (state.tab === "params") return `<footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原输入</button><span>${state.running ? "任务运行中，参数已锁定；可以停止任务。" : settings.idleActionText}</span></footer>`;
     if (state.tab === "records") return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>`;
-    return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="export-json" ${state.dataRows.length ? "" : "disabled"}>导出 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${state.dataRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>当前 ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>`;
+    const filteredRows = filterDataRows(state.dataRows, dataFilterDefinitions, state.dataFilters);
+    return `<footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button emphasized" type="button" data-action="copy-json" ${filteredRows.length ? "" : "disabled"}>复制 JSON</button><button class="xhs-secondary-button emphasized" type="button" data-action="export-csv" ${filteredRows.length ? "" : "disabled"}>导出表格</button><button class="xhs-secondary-button" type="button" data-action="clear-data" ${state.dataRows.length && !state.running ? "" : "disabled"}>清空数据</button><span>筛选结果 ${filteredRows.length} / ${state.dataRows.length} 条 · 最多保留 ${formatLimitValue(state.dataStorageLimit)}</span></footer>`;
   };
   const renderPage = (state, context) => `<section class="xhs-monitor has-fixed-actions" aria-labelledby="profileMonitorTitle"><header class="xhs-hero"><div class="xhs-title-row"><h1 id="profileMonitorTitle">${escapeHtml(context.feature.name)}</h1><span class="xhs-version">v0.1.0</span><button class="xhs-guide-button" type="button" data-action="open-guide" title="查看使用说明"><span>使用说明</span><img src="src/assets/icons/question-circle.svg" alt=""></button></div>${renderRunButton(state, "xhs-top-run")}</header><nav class="xhs-tabs" role="tablist">${renderTabs(state)}</nav><div class="xhs-notice ${escapeHtml(state.notice.tone)}" role="status">${escapeHtml(state.notice.text)}</div><div class="xhs-workspace has-fixed-actions ${state.tab === "params" ? "" : "is-table-view"}">${state.tab === "params" ? renderParameters(state) : state.tab === "records" ? renderRecords(state) : renderData(state)}</div>${renderAction(state)}${renderBatch(state)}${renderGuide(state)}${renderTask(state)}</section>`;
 
@@ -181,7 +194,7 @@ export function createWeiboProfileMonitor(settings) {
     });
     const savedRange = normalizeProfileIntervalRange(savedConfig);
     const state = {
-      tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...defaultUrls], inputListPage: 1, dataStorageLimit: storageLimits.dataStorageLimit, taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit, records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit), dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit), batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100), concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedRange.intervalMinMs, intervalMaxMs: savedRange.intervalMaxMs, polling: supportsPolling && Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeRuns.get(runScope) && !activeRuns.get(runScope).stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, notice: saved?.notice || { tone: "info", text: settings.initialNotice }
+      tab: "params", profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...defaultUrls], inputListPage: 1, dataStorageLimit: storageLimits.dataStorageLimit, taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit, records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit), dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit), batchOpen: false, batchDraft: "", guideOpen: false, taskDetailRecordId: "", limit: asInteger(savedConfig.limit, DEFAULT_OPTIONS.limit, 1, 100), concurrency: normalizeTaskConcurrency(savedConfig.concurrency), intervalMinMs: savedRange.intervalMinMs, intervalMaxMs: savedRange.intervalMaxMs, polling: supportsPolling && Boolean(savedConfig.polling), pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440), optionsOpen: false, running: Boolean(activeRuns.get(runScope) && !activeRuns.get(runScope).stopRequested), stopping: false, recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }, dataFilters: createDataFilterValues(dataFilterDefinitions), dataFiltersOpen: true, notice: saved?.notice || { tone: "info", text: settings.initialNotice }
     };
     saveState(state);
     let disposed = false;
@@ -323,7 +336,7 @@ export function createWeiboProfileMonitor(settings) {
       state.running = false; state.stopping = false; state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit); state.dataRows = Array.isArray(latest?.dataRows) ? applyItemLimit(latest.dataRows, state.dataStorageLimit) : state.dataRows; state.notice = latest?.notice || state.notice; render();
     };
     const closeModal = () => { state.taskDetailRecordId = ""; state.batchOpen = false; state.guideOpen = false; render(); };
-    const handleClick = (event) => {
+    const handleClick = async (event) => {
       if (event.target.matches(".xhs-modal-backdrop")) { closeModal(); return; }
       const tab = event.target.closest("[data-tab]"); if (tab) { state.tab = tab.dataset.tab; render(); return; }
       const button = event.target.closest("[data-action]"); if (!button || button.disabled) return;
@@ -331,6 +344,8 @@ export function createWeiboProfileMonitor(settings) {
         case "run": startRun().catch((error) => { activeRun = null; activeRuns.delete(runScope); state.running = false; state.stopping = false; state.notice = { tone: "error", text: error.message || String(error) }; render(); }); break;
         case "stop": stopRun().catch((error) => { state.notice = { tone: "error", text: `停止任务失败：${error.message || String(error)}` }; render(); }); break;
         case "toggle-options": state.optionsOpen = !state.optionsOpen; render(); break;
+        case "toggle-data-filters": state.dataFiltersOpen = !state.dataFiltersOpen; render(); break;
+        case "clear-data-filters": state.dataFilters = createDataFilterValues(dataFilterDefinitions); render(); break;
         case "set-input-list-page": state.inputListPage = clampInputListPage(button.dataset.page, state.profileUrls); render(); break;
         case "add-profile": state.profileUrls.push(""); state.inputListPage = pageForInputIndex(state.profileUrls.length - 1); render(); requestAnimationFrame(() => container.querySelector(`[data-profile-index="${state.profileUrls.length - 1}"]`)?.focus()); break;
         case "remove-profile": state.profileUrls.splice(Number(button.dataset.index), 1); state.inputListPage = clampInputListPage(state.inputListPage, state.profileUrls); saveState(state); render(); break;
@@ -342,14 +357,41 @@ export function createWeiboProfileMonitor(settings) {
         case "open-task-detail": state.taskDetailRecordId = button.dataset.recordId; state.batchOpen = false; state.guideOpen = false; render(); break;
         case "close-task-detail": state.taskDetailRecordId = ""; render(); break;
         case "clear-records": state.records = []; state.recordFilters = { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }; state.taskDetailRecordId = ""; saveState(state); render(); break;
-        case "clear-data": state.dataRows = []; saveState(state); render(); break;
-        case "export-json": settings.downloadData(state.dataRows, "json"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条 JSON 数据。` }; render(); break;
-        case "export-csv": settings.downloadData(state.dataRows, "csv"); state.notice = { tone: "success", text: `已导出 ${state.dataRows.length} 条表格数据（CSV）。` }; render(); break;
+        case "clear-data": state.dataRows = []; state.dataFilters = createDataFilterValues(dataFilterDefinitions); saveState(state); render(); break;
+        case "copy-json": {
+          const rows = filterDataRows(state.dataRows, dataFilterDefinitions, state.dataFilters);
+          try {
+            openRowsJsonPreview(rows, buildExportRows);
+          } catch (error) {
+            state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
+            render();
+          }
+          break;
+        }
+        case "export-csv": {
+          const rows = filterDataRows(state.dataRows, dataFilterDefinitions, state.dataFilters);
+          settings.downloadData(rows, "csv");
+          state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
+          render();
+          break;
+        }
         case "reset": Object.assign(state, { profileUrls: [...defaultUrls], inputListPage: 1, limit: DEFAULT_OPTIONS.limit, concurrency: DEFAULT_OPTIONS.concurrency, intervalMinMs: DEFAULT_OPTIONS.intervalMinMs, intervalMaxMs: DEFAULT_OPTIONS.intervalMaxMs, polling: false, pollingMinutes: DEFAULT_OPTIONS.pollingMinutes, optionsOpen: false, notice: { tone: "success", text: "已还原主页输入与基础运行选项。" } }); saveState(state); render(); break;
         default: break;
       }
     };
     const handleInput = (event) => {
+      const dataFilter = event.target.dataset.dataFilter;
+      if (dataFilter && event.target.tagName === "INPUT") {
+        const selectionStart = event.target.selectionStart;
+        state.dataFilters[dataFilter] = event.target.value;
+        render();
+        requestAnimationFrame(() => {
+          const input = container.querySelector(`[data-data-filter="${dataFilter}"]`);
+          input?.focus();
+          input?.setSelectionRange?.(selectionStart, selectionStart);
+        });
+        return;
+      }
       if (event.target.dataset.profileIndex !== undefined) state.profileUrls[Number(event.target.dataset.profileIndex)] = event.target.value;
       if (event.target.matches("[data-batch-input]")) state.batchDraft = event.target.value;
       const field = event.target.dataset.field;
@@ -360,6 +402,8 @@ export function createWeiboProfileMonitor(settings) {
       if (supportsPolling && field === "pollingMinutes") state.pollingMinutes = asInteger(event.target.value, state.pollingMinutes, 1, 1440);
     };
     const handleChange = (event) => {
+      const dataFilter = event.target.dataset.dataFilter;
+      if (dataFilter) { state.dataFilters[dataFilter] = event.target.value; render(); return; }
       const recordFilter = event.target.dataset.recordFilter;
       if (recordFilter) { state.recordFilters[recordFilter] = event.target.value; render(); return; }
       const field = event.target.dataset.field;

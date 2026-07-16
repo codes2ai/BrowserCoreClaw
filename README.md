@@ -26,7 +26,7 @@ BrowserCoreClaw 是一个 [Chrome Manifest V3](https://developer.chrome.com/docs
 - **页面稳定性控制**：在读取前等待目标区域、筛选状态或滚动加载结果稳定，降低“页面尚未刷新完成即采集”的概率。
 - **可控采集节奏**：主页类和关键词类功能支持随机间隔；支持循环监控的功能可按轮次持续运行，直至手动停止。
 - **记录与数据分离**：运行记录支持关键词/链接与状态筛选；点击任务编号可查看单次任务的状态、耗时、结果数量和错误信息。
-- **本地留存与导出**：每项功能的数据最多保留 3,000 条；运行记录按状态最多保留 200 条；支持 JSON 与 UTF-8 BOM CSV 导出。
+- **本地留存与导出**：每项功能的数据最多保留 3,000 条；运行记录按状态最多保留 200 条；数据页支持字段筛选、JSON 弹窗预览与一键复制，以及 UTF-8 BOM CSV 导出。
 
 ## 支持的平台与功能
 
@@ -52,25 +52,25 @@ flowchart LR
   A[唯一完整控制台标签页<br/>功能界面] --> B[功能 Monitor<br/>参数、记录与数据视图]
   B -->|chrome.runtime.sendMessage| C[Service Worker<br/>消息路由]
   C --> D[功能 Background<br/>任务编排与状态控制]
-  D --> E[Chrome Debugger API<br/>导航、等待、页面脚本]
+  D --> E[Tabs + Scripting API<br/>导航、等待、页面脚本]
   E --> F[独立目标网站标签页<br/>公开页面]
   D --> G[chrome.storage.local<br/>数据与运行记录]
   G --> B
-  B --> H[JSON / CSV 导出]
+  B --> H[筛选 / JSON 预览与复制 / CSV 导出]
 ```
 
 每项功能遵循相同的职责边界：
 
 1. **界面层（`index.js` / `monitor.js`）**：维护输入、运行状态、记录和数据表。
-2. **后台层（`background.js`）**：为采集任务创建独立目标标签页、调用 Debugger、处理停止信号与错误；不占用控制台标签页。
+2. **后台层（`background.js`）**：为采集任务创建独立目标标签页，通过 Tabs 与 Scripting API 导航和执行页面命令，并处理停止信号与错误；不占用控制台标签页。
 3. **页面解析层（`page-extract.js`，按需提供）**：从页面公开 DOM 中读取数据，并判断筛选或列表是否稳定。
-4. **导出层（`export-data.js`）**：将本地结果规范化为 JSON 与 CSV。
+4. **筛选与导出层（`data-table-filter.js`、`export-data.js`）**：按表格字段筛选本地结果，复制筛选后的 JSON，并导出筛选后的 CSV。
 
 ## 快速开始
 
 ### 环境要求
 
-- 最新版 Google Chrome（需支持 Manifest V3 与 Debugger API）。
+- 最新版 Google Chrome（需支持 Manifest V3、Tabs 与 Scripting API）。
 - Node.js 18+（仅用于校验与打包）。
 
 项目没有第三方 npm 依赖；执行以下脚本前无需安装 `node_modules`。
@@ -113,10 +113,10 @@ npm run package
 | --- | --- |
 | `storage` | 保存输入配置、运行记录与采集结果。 |
 | `tabs` / `activeTab` | 定位唯一控制台标签页，并为每项采集任务创建独立的目标站点标签页。 |
-| `debugger` | 驱动页面导航、等待页面稳定并读取公开页面内容。 |
+| `scripting` | 在已授权的平台页面中执行自包含的 DOM 读取与交互命令，不建立调试会话。 |
 | 站点 Host Permissions | 允许扩展在 Google、小红书、微博和抖音的已声明域名中执行采集流程。 |
 
-Debugger 只能同时被有限的调试会话占用。若浏览器 DevTools、其他自动化工具或扩展正在调试同一标签页，任务可能出现连接中断提示；关闭冲突工具后重新运行即可。
+全部采集功能均使用普通标签页与 `scripting` 权限，不申请 `debugger` 权限，也不会显示 Chrome 的“已开始调试此浏览器”提示。
 
 ## 项目结构
 
@@ -126,7 +126,7 @@ BrowserCoreClaw/
 ├── sidepanel.html                        # 扩展完整控制台页面
 ├── src/
 │   ├── app/                              # 首页、配置加载、功能路由与通用样式
-│   ├── background/                       # Service Worker 消息路由、Debugger 客户端
+│   ├── background/                       # Service Worker 消息路由、标签页脚本客户端
 │   ├── config/groups.json                # 平台分组与功能入口的唯一配置源
 │   ├── groups/
 │   │   └── <platform>/<feature>/          # 每项功能的独立实现目录
@@ -134,7 +134,7 @@ BrowserCoreClaw/
 │   │       ├── monitor.js                # 页面状态、任务记录与数据界面
 │   │       ├── background.js             # 后台采集任务（按需）
 │   │       ├── page-extract.js           # 页面稳定性与数据解析（按需）
-│   │       ├── export-data.js            # JSON / CSV 数据导出（按需）
+│   │       ├── export-data.js            # JSON 序列化 / CSV 数据导出（按需）
 │   │       ├── constants.js              # 消息类型与功能常量（按需）
 │   │       └── styles.css                # 功能私有样式
 │   └── shared/                           # 跨功能复用的任务明细等能力
@@ -184,7 +184,7 @@ BrowserCoreClaw/
 | 现象 | 优先检查 |
 | --- | --- |
 | 运行后未获取数据 | 目标页面是否已完成登录、验证码或安全验证；页面公开内容是否可见。 |
-| 任务提示 Debugger 未连接或被占用 | 关闭正在调试同一标签页的 DevTools、自动化工具或其他扩展，然后重新运行。 |
+| 页面脚本无法执行 | 确认目标地址属于 manifest 已授权域名，并在权限变化后重新加载扩展。 |
 | 筛选后数据仍是旧结果 | 等待页面筛选状态与结果列表稳定；如站点改版，更新对应的 `page-extract.js`。 |
 | 点击扩展图标未打开或定位控制台 | 在 `chrome://extensions/` 重新加载扩展，并检查 Service Worker 控制台错误。 |
 | 静态预览可打开但采集失败 | 确认是在已加载的扩展中运行，而非普通 HTTP 页面。 |

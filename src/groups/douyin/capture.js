@@ -1,4 +1,4 @@
-import { attachDebugger, detachDebugger, evaluate, sendCommand, sleep } from "../../background/debugger-client.js";
+import { executeTabFunction, navigateTab, sleep } from "../../background/tab-script-client.js";
 import { runDouyinPageCommand } from "./page-extract.js";
 
 const DOUYIN_HOME_URL = "https://www.douyin.com/";
@@ -46,8 +46,8 @@ async function getDouyinTab(preferredTabId = null, isolated = false) {
   if (isolated) {
     return callChrome((done) => chrome.tabs.create({ url: DOUYIN_HOME_URL, active: false }, done));
   }
-  // 任务首次运行时使用独立标签页，避免占用用户正在浏览、且可能被其它
-  // 采集工具调试的抖音页面。后续同一任务会通过 tabId 复用该页面。
+  // 任务首次运行时使用独立标签页，避免占用用户正在浏览的抖音页面。
+  // 后续同一任务会通过 tabId 复用该页面。
   return callChrome((done) => chrome.tabs.create({ url: DOUYIN_HOME_URL, active: true }, done));
 }
 
@@ -62,24 +62,7 @@ function throwIfStopped(session) {
 }
 
 function pageCommand(tabId, command, options = {}) {
-  return evaluate(tabId, `(${runDouyinPageCommand.toString()})(${JSON.stringify(command)}, ${JSON.stringify(options)})`);
-}
-
-function isDetachedDebuggerError(error) {
-  return /debugger is not attached|cannot find context with specified id|inspected target navigated or closed/i.test(error?.message || "");
-}
-
-async function reconnectDebugger(tabId, session) {
-  throwIfStopped(session);
-  session.reconnects = Number(session.reconnects || 0) + 1;
-  if (session.reconnects > 3) {
-    throw new Error("抖音页面调试连接连续中断。请关闭同时占用抖音页面的采集/调试扩展后重试。");
-  }
-  await attachDebugger(tabId).catch((error) => {
-    if (!/already attached/i.test(error.message)) throw error;
-  });
-  await sendCommand(tabId, "Runtime.enable");
-  await sendCommand(tabId, "Page.enable");
+  return executeTabFunction(tabId, runDouyinPageCommand, [command, options]);
 }
 
 async function waitForStablePage(tabId, operation, session) {
@@ -110,13 +93,6 @@ async function waitForStablePage(tabId, operation, session) {
     } catch (error) {
       if (session.stopped || error.code === stoppedError(operation).code) throw stoppedError(operation);
       if (/安全验证/.test(error.message)) throw error;
-      if (isDetachedDebuggerError(error)) {
-        lastState = { error: "页面导航时调试连接中断，正在重新连接" };
-        signature = ""; stableSince = 0; stablePolls = 0;
-        await reconnectDebugger(tabId, session);
-        await sleep(250);
-        continue;
-      }
       lastState = { error: error.message || String(error) };
       signature = ""; stableSince = 0; stablePolls = 0;
     }
@@ -171,17 +147,13 @@ export async function captureDouyin(operation, options) {
   const ownsTargetTab = Boolean(options.isolated) && !hasRequestedTab;
   const tab = await getDouyinTab(requestedTabId, Boolean(options.isolated));
   if (!Number.isInteger(tab?.id)) throw new Error("无法找到用于抖音采集的标签页。");
-  const session = { runId, operation, tabId: tab.id, stopped: false, reconnects: 0 };
+  const session = { runId, operation, tabId: tab.id, stopped: false };
   activeCaptures.set(`${operation}:${runId}`, session);
-  let attached = false;
   let completed = false;
   try {
     if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
-    await attachDebugger(tab.id); attached = true;
-    await sendCommand(tab.id, "Runtime.enable");
-    await sendCommand(tab.id, "Page.enable");
     throwIfStopped(session);
-    await sendCommand(tab.id, "Page.navigate", { url: targetUrl });
+    await navigateTab(tab.id, targetUrl);
     await waitForStablePage(tab.id, operation, session);
     throwIfStopped(session);
     const data = operation === "profile-posts"
@@ -193,7 +165,6 @@ export async function captureDouyin(operation, options) {
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(`${operation}:${runId}`) === session) activeCaptures.delete(`${operation}:${runId}`);
-    if (attached) await detachDebugger(tab.id).catch(() => {});
     if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
@@ -202,6 +173,5 @@ export async function stopDouyinCapture(operation, options) {
   const session = activeCaptures.get(`${operation}:${String(options.runId || "").trim()}`);
   if (!session) return { ok: true, stopped: false };
   session.stopped = true;
-  await detachDebugger(session.tabId).catch(() => {});
   return { ok: true, stopped: true };
 }

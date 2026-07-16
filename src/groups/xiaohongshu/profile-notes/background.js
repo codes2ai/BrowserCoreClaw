@@ -1,4 +1,9 @@
-import { attachDebugger, detachDebugger, evaluate, sendCommand, sleep } from "../../../background/debugger-client.js";
+import {
+  executeTabFunction,
+  navigateTab,
+  scrollPageToBottom,
+  sleep
+} from "../../../background/tab-script-client.js";
 import {
   XIAOHONGSHU_HOME_URL,
   XIAOHONGSHU_PROFILE_READY_TIMEOUT_MS,
@@ -67,7 +72,7 @@ function throwIfStopped(session) {
 }
 
 async function getProfilePageState(tabId) {
-  return evaluate(tabId, `(${runXiaohongshuProfilePageCommand.toString()})("inspect")`);
+  return executeTabFunction(tabId, runXiaohongshuProfilePageCommand, ["inspect"]);
 }
 
 async function waitForProfilePage(tabId, session) {
@@ -143,9 +148,10 @@ async function collectProfileData(tabId, limit, session) {
 
   for (let round = 0; round < 24; round += 1) {
     throwIfStopped(session);
-    const data = await evaluate(
+    const data = await executeTabFunction(
       tabId,
-      `(${runXiaohongshuProfilePageCommand.toString()})("extract", ${JSON.stringify({ limit: maximum })})`
+      runXiaohongshuProfilePageCommand,
+      ["extract", { limit: maximum }]
     );
     throwIfStopped(session);
     pageUrl = data?.pageUrl || pageUrl;
@@ -166,7 +172,7 @@ async function collectProfileData(tabId, limit, session) {
     previousSignature = signature;
     if (unchangedRounds >= 3) break;
 
-    await evaluate(tabId, "window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });");
+    await executeTabFunction(tabId, scrollPageToBottom);
     await sleep(1100);
   }
 
@@ -194,24 +200,18 @@ export async function captureXiaohongshuProfile(options) {
 
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
-  let attached = false;
   let completed = false;
   try {
     throwIfStopped(session);
     if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
-    await attachDebugger(tab.id);
-    attached = true;
-    await sendCommand(tab.id, "Runtime.enable");
-    await sendCommand(tab.id, "Page.enable");
     throwIfStopped(session);
-    await sendCommand(tab.id, "Page.navigate", { url: profileUrl });
+    await navigateTab(tab.id, profileUrl);
     await waitForProfilePage(tab.id, session);
     const data = await collectProfileData(tab.id, options.limit, session);
     completed = true;
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
-    if (attached) await detachDebugger(tab.id).catch(() => {});
     if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
@@ -221,6 +221,5 @@ export async function stopXiaohongshuProfileCapture(options) {
   const session = activeCaptures.get(runId);
   if (!session) return { ok: true, stopped: false };
   session.stopped = true;
-  await detachDebugger(session.tabId).catch(() => {});
   return { ok: true, stopped: true };
 }

@@ -1,5 +1,5 @@
 import { MESSAGE_CAPTURE_WEIBO_POST_DETAIL, MESSAGE_STOP_WEIBO_POST_DETAIL } from "./constants.js";
-import { downloadWeiboPostDetailData } from "./export-data.js";
+import { buildWeiboPostDetailExportRows, downloadWeiboPostDetailData } from "./export-data.js";
 import { createWeiboProfileMonitor } from "../profile-monitor.js";
 
 function isWeiboPostUrl(value) {
@@ -35,13 +35,30 @@ export const mountWeiboPostDetailMonitor = createWeiboProfileMonitor({
   hasLimit: false,
   supportsPolling: false,
   dataSummary: "每条正文链接只保留最新一条详情数据。",
+  emptyDataText: "运行后，微博正文详情会显示在这里",
+  dataFilters: [
+    { key: "postId", label: "博文 ID" },
+    { key: "visibility", label: "可见范围", type: "select" },
+    { key: "author", label: "作者", type: "select" },
+    { key: "text", label: "正文" },
+    { key: "publishedAt", label: "发布时间", placeholder: "例如 2026-07-15" },
+    { key: "source", label: "来源", type: "select" },
+    { key: "topics", label: "话题" },
+    { key: "mentions", label: "提及" },
+    { key: "reposts", label: "转发" },
+    { key: "comments", label: "评论" },
+    { key: "likes", label: "点赞" },
+    { key: "postUrl", label: "正文链接" },
+    { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
+  ],
   toRows(data, postUrl) {
     const detail = data?.detail || {};
     const id = String(detail.postId || detail.postUrl || postUrl || "").trim();
     return id ? [{ id, ...detail, postUrl: detail.postUrl || postUrl, capturedAt: data?.capturedAt || new Date().toISOString() }] : [];
   },
   downloadData: downloadWeiboPostDetailData,
-  renderDataTable(rows, escapeHtml) {
-    return `<thead><tr><th>博文 ID</th><th>可见范围</th><th>作者</th><th>正文</th><th>发布时间</th><th>来源</th><th>话题</th><th>提及</th><th>转发</th><th>评论</th><th>点赞</th><th>媒体链接</th><th>关联链接</th><th>正文链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${escapeHtml(row.postId || "-")}</td><td>${escapeHtml(row.visibility || "-")}</td><td>${row.authorUrl ? `<a href="${escapeHtml(row.authorUrl)}" target="_blank" rel="noreferrer">${escapeHtml(row.author || "-")}</a>` : escapeHtml(row.author || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.text || "")}">${escapeHtml(row.text || "-")}</td><td>${escapeHtml(row.publishedAt || "-")}</td><td>${escapeHtml(row.source || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.topics || "")}">${escapeHtml(row.topics || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.mentions || "")}">${escapeHtml(row.mentions || "-")}</td><td>${escapeHtml(row.reposts || "0")}</td><td>${escapeHtml(row.comments || "0")}</td><td>${escapeHtml(row.likes || "0")}</td><td class="xhs-description-cell" title="${escapeHtml(row.mediaUrls || "")}">${escapeHtml(row.mediaUrls || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.contentLinks || "")}">${escapeHtml(row.contentLinks || "-")}</td><td>${row.postUrl ? `<a href="${escapeHtml(row.postUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="15">运行后，微博正文详情会显示在这里</td></tr>`}</tbody>`;
+  buildExportRows: buildWeiboPostDetailExportRows,
+  renderDataTable(rows, escapeHtml, { emptyText } = {}) {
+    return `<thead><tr><th>博文 ID</th><th>可见范围</th><th>作者</th><th>正文</th><th>发布时间</th><th>来源</th><th>话题</th><th>提及</th><th>转发</th><th>评论</th><th>点赞</th><th>媒体链接</th><th>关联链接</th><th>正文链接</th><th>采集时间</th></tr></thead><tbody>${rows.length ? rows.map((row) => `<tr><td>${escapeHtml(row.postId || "-")}</td><td>${escapeHtml(row.visibility || "-")}</td><td>${row.authorUrl ? `<a href="${escapeHtml(row.authorUrl)}" target="_blank" rel="noreferrer">${escapeHtml(row.author || "-")}</a>` : escapeHtml(row.author || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.text || "")}">${escapeHtml(row.text || "-")}</td><td>${escapeHtml(row.publishedAt || "-")}</td><td>${escapeHtml(row.source || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.topics || "")}">${escapeHtml(row.topics || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.mentions || "")}">${escapeHtml(row.mentions || "-")}</td><td>${escapeHtml(row.reposts || "0")}</td><td>${escapeHtml(row.comments || "0")}</td><td>${escapeHtml(row.likes || "0")}</td><td class="xhs-description-cell" title="${escapeHtml(row.mediaUrls || "")}">${escapeHtml(row.mediaUrls || "-")}</td><td class="xhs-description-cell" title="${escapeHtml(row.contentLinks || "")}">${escapeHtml(row.contentLinks || "-")}</td><td>${row.postUrl ? `<a href="${escapeHtml(row.postUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td></tr>`).join("") : `<tr><td class="xhs-table-empty" colspan="15">${escapeHtml(emptyText || "运行后，微博正文详情会显示在这里")}</td></tr>`}</tbody>`;
   }
 });

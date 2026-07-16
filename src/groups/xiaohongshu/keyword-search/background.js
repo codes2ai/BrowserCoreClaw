@@ -1,4 +1,9 @@
-import { attachDebugger, detachDebugger, evaluate, sendCommand, sleep } from "../../../background/debugger-client.js";
+import {
+  executeTabFunction,
+  navigateTab,
+  scrollPageToBottom,
+  sleep
+} from "../../../background/tab-script-client.js";
 import {
   XIAOHONGSHU_FILTER_SETTLE_MIN_MS,
   XIAOHONGSHU_FILTER_SETTLE_POLLS,
@@ -14,6 +19,29 @@ import { buildXiaohongshuSearchUrl } from "./search-url.js";
 const XIAOHONGSHU_URL_PATTERNS = ["https://www.xiaohongshu.com/*", "https://*.xiaohongshu.com/*"];
 const activeCaptures = new Map();
 let managedLoginTabId = null;
+
+function readXiaohongshuLoginState() {
+  const isVisible = (element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden"
+      && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+  };
+  const controls = [...document.querySelectorAll("a, button, [role='button']")]
+    .filter(isVisible)
+    .map((element) => String(
+      element.innerText || element.getAttribute("aria-label") || element.getAttribute("title") || ""
+    ).trim())
+    .filter(Boolean);
+  const pageText = String(document.body?.innerText || "").replace(/\s+/g, " ").trim();
+  return {
+    href: location.href,
+    readyState: document.readyState,
+    hasLoginEntry: controls.some((label) => /登录|登入|注册/.test(label)),
+    isVerificationPage: /验证码|安全验证|人机验证|访问过于频繁/.test(pageText),
+    hasEnoughContent: pageText.length > 80
+  };
+}
 
 function callChrome(callbackApi) {
   return new Promise((resolve, reject) => {
@@ -96,59 +124,27 @@ async function getXiaohongshuTab(preferredTabId = null, isolated = false) {
 }
 
 async function inspectLoginState(tabId) {
-  let attached = false;
   const deadline = Date.now() + XIAOHONGSHU_READY_TIMEOUT_MS;
   let lastError = null;
 
-  try {
-    await attachDebugger(tabId);
-    attached = true;
-    await sendCommand(tabId, "Runtime.enable");
-
-    while (Date.now() < deadline) {
-      try {
-        const pageState = await evaluate(tabId, `(() => {
-          const isVisible = (element) => {
-            const style = getComputedStyle(element);
-            const rect = element.getBoundingClientRect();
-            return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
-          };
-          const controls = [...document.querySelectorAll("a, button, [role='button']")]
-            .filter(isVisible)
-            .map((element) => String(element.innerText || element.getAttribute("aria-label") || element.getAttribute("title") || "").trim())
-            .filter(Boolean);
-          const pageText = String(document.body?.innerText || "").replace(/\\s+/g, " ").trim();
-          const hasLoginEntry = controls.some((label) => /登录|登入|注册/.test(label));
-          const isVerificationPage = /验证码|安全验证|人机验证|访问过于频繁/.test(pageText);
+  while (Date.now() < deadline) {
+    try {
+      const pageState = await executeTabFunction(tabId, readXiaohongshuLoginState);
+      if (pageState?.readyState === "complete" && pageState.hasEnoughContent) {
+        if (pageState.isVerificationPage) {
           return {
-            href: location.href,
-            readyState: document.readyState,
-            hasLoginEntry,
-            isVerificationPage,
-            hasEnoughContent: pageText.length > 80
+            state: "unknown",
+            reason: "小红书页面需要安全验证，请在标签页中完成后重新检测。"
           };
-        })()`);
-
-        if (pageState?.readyState === "complete" && pageState.hasEnoughContent) {
-          if (pageState.isVerificationPage) {
-            return {
-              state: "unknown",
-              reason: "小红书页面需要安全验证，请在标签页中完成后重新检测。"
-            };
-          }
-          return pageState.hasLoginEntry
-            ? { state: "logged_out", reason: "当前 Chrome Profile 尚未登录小红书。" }
-            : { state: "logged_in", reason: "已确认当前 Chrome Profile 的小红书登录状态。" };
         }
-      } catch (error) {
-        lastError = error;
+        return pageState.hasLoginEntry
+          ? { state: "logged_out", reason: "当前 Chrome Profile 尚未登录小红书。" }
+          : { state: "logged_in", reason: "已确认当前 Chrome Profile 的小红书登录状态。" };
       }
-      await sleep(500);
+    } catch (error) {
+      lastError = error;
     }
-  } finally {
-    if (attached) {
-      await detachDebugger(tabId).catch(() => {});
-    }
+    await sleep(500);
   }
 
   return {
@@ -159,7 +155,7 @@ async function inspectLoginState(tabId) {
 
 export async function checkXiaohongshuLogin() {
   // 每次检测都使用专用临时页，绝不复用正在被采集任务控制的小红书页。
-  // 这样三个小红书功能可以同时运行，登录检测也不会抢占其它任务的调试连接。
+  // 这样三个小红书功能可以同时运行，登录检测也不会占用其它任务的采集页面。
   const tab = await callChrome((done) => chrome.tabs.create({
     url: XIAOHONGSHU_HOME_URL,
     active: false
@@ -207,7 +203,7 @@ function throwIfStopped(session) {
 }
 
 async function getSearchPageState(tabId) {
-  return evaluate(tabId, `(${runXiaohongshuSearchPageCommand.toString()})("inspect")`);
+  return executeTabFunction(tabId, runXiaohongshuSearchPageCommand, ["inspect"]);
 }
 
 async function waitForSearchResults(tabId, session) {
@@ -242,9 +238,10 @@ async function waitForSearchResults(tabId, session) {
 
 async function applySearchFilters(tabId, filters, session) {
   throwIfStopped(session);
-  const response = await evaluate(
+  const response = await executeTabFunction(
     tabId,
-    `(${runXiaohongshuSearchPageCommand.toString()})("apply_filters", ${JSON.stringify({ filters })})`
+    runXiaohongshuSearchPageCommand,
+    ["apply_filters", { filters }]
   );
   throwIfStopped(session);
   if (!response?.ok) {
@@ -321,9 +318,10 @@ async function collectSearchResults(tabId, limit, session) {
 
   for (let round = 0; round < 24; round += 1) {
     throwIfStopped(session);
-    const data = await evaluate(
+    const data = await executeTabFunction(
       tabId,
-      `(${runXiaohongshuSearchPageCommand.toString()})("extract", ${JSON.stringify({ limit: maximum })})`
+      runXiaohongshuSearchPageCommand,
+      ["extract", { limit: maximum }]
     );
     throwIfStopped(session);
     if (!bestData || data.results.length >= bestData.results.length) bestData = data;
@@ -334,7 +332,7 @@ async function collectSearchResults(tabId, limit, session) {
     if (unchangedRounds >= 3) break;
     previousCount = data.results.length;
 
-    await evaluate(tabId, "window.scrollTo({ top: document.documentElement.scrollHeight, behavior: 'smooth' });");
+    await executeTabFunction(tabId, scrollPageToBottom);
     await sleep(1100);
   }
 
@@ -358,17 +356,12 @@ export async function captureXiaohongshuKeyword(options) {
 
   const session = { runId, tabId: tab.id, stopped: false };
   activeCaptures.set(runId, session);
-  let attached = false;
   let completed = false;
   try {
     throwIfStopped(session);
     if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
-    await attachDebugger(tab.id);
-    attached = true;
-    await sendCommand(tab.id, "Runtime.enable");
-    await sendCommand(tab.id, "Page.enable");
     throwIfStopped(session);
-    await sendCommand(tab.id, "Page.navigate", { url: buildXiaohongshuSearchUrl(query) });
+    await navigateTab(tab.id, buildXiaohongshuSearchUrl(query));
     const pageState = await waitForSearchResults(tab.id, session);
     if (pageState.noResults) {
       completed = true;
@@ -385,7 +378,6 @@ export async function captureXiaohongshuKeyword(options) {
     return { ok: true, tabId: tab.id, data };
   } finally {
     if (activeCaptures.get(runId) === session) activeCaptures.delete(runId);
-    if (attached) await detachDebugger(tab.id).catch(() => {});
     if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
   }
 }
@@ -395,6 +387,5 @@ export async function stopXiaohongshuKeywordCapture(options) {
   const session = activeCaptures.get(runId);
   if (!session) return { ok: true, stopped: false };
   session.stopped = true;
-  await detachDebugger(session.tabId).catch(() => {});
   return { ok: true, stopped: true };
 }

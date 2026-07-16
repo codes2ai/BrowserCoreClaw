@@ -147,3 +147,300 @@
     justify-content: center;
   }
 }
+
+.data-filter-panel {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.data-filter-header,
+.data-filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.data-filter-header {
+  justify-content: space-between;
+}
+
+.data-filter-header > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.data-filter-header strong {
+  color: var(--news-ink, var(--xhs-ink, #172033));
+  font-size: 13px;
+}
+
+.data-filter-header span {
+  color: var(--news-muted, var(--xhs-muted, #667085));
+  font-size: 11px;
+}
+
+.data-filter-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--news-ink, var(--xhs-ink, #172033));
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.data-filter-actions button:hover:not(:disabled) {
+  border-color: var(--news-blue, var(--xhs-blue, #2f73e8));
+  color: var(--news-blue, var(--xhs-blue, #2f73e8));
+}
+
+.data-filter-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.data-filter-toggle span {
+  margin-left: 5px;
+  color: currentColor;
+  font-size: 12px;
+}
+
+.data-filter-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+}
+
+.data-filter-control {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.data-filter-control > span {
+  color: var(--news-muted, var(--xhs-muted, #667085));
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.data-filter-control input,
+.data-filter-control select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  border-radius: 8px;
+  outline: none;
+  background: #ffffff;
+  color: var(--news-ink, var(--xhs-ink, #172033));
+  font: inherit;
+  font-size: 12px;
+}
+
+.data-filter-control input:focus,
+.data-filter-control select:focus {
+  border-color: var(--news-blue, var(--xhs-blue, #2f73e8));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--news-blue, var(--xhs-blue, #2f73e8)) 12%, transparent);
+}
+
+@media (max-width: 640px) {
+  .data-filter-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .data-filter-actions {
+    justify-content: flex-end;
+  }
+
+  .data-filter-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+.json-preview-backdrop {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.58);
+  backdrop-filter: blur(3px);
+}
+
+.json-preview-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(860px, 100%);
+  max-height: min(760px, calc(100vh - 40px));
+  overflow: hidden;
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+}
+
+.json-preview-header,
+.json-preview-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+}
+
+.json-preview-header {
+  border-bottom: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+}
+
+.json-preview-header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.json-preview-header span {
+  color: var(--news-blue, var(--xhs-blue, #2f73e8));
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0.14em;
+}
+
+.json-preview-header h2,
+.json-preview-header p {
+  margin: 0;
+}
+
+.json-preview-header h2 {
+  color: var(--news-ink, var(--xhs-ink, #172033));
+  font-size: 18px;
+}
+
+.json-preview-header p,
+.json-preview-status {
+  color: var(--news-muted, var(--xhs-muted, #667085));
+  font-size: 11px;
+}
+
+.json-preview-close {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  border-radius: 9px;
+  background: #ffffff;
+  color: var(--news-ink, var(--xhs-ink, #172033));
+  cursor: pointer;
+  font: inherit;
+}
+
+.json-preview-content {
+  min-height: 240px;
+  padding: 14px 18px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.json-preview-content textarea {
+  width: 100%;
+  height: clamp(240px, 52vh, 540px);
+  min-height: 0;
+  resize: none;
+  padding: 14px;
+  overflow: auto;
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  border-radius: 10px;
+  outline: none;
+  background: #0f172a;
+  color: #dbeafe;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.json-preview-content textarea:focus {
+  border-color: var(--news-blue, var(--xhs-blue, #2f73e8));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--news-blue, var(--xhs-blue, #2f73e8)) 12%, transparent);
+}
+
+.json-preview-footer {
+  border-top: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+}
+
+.json-preview-footer > div {
+  display: flex;
+  gap: 8px;
+}
+
+.json-preview-footer button {
+  min-height: 36px;
+  padding: 0 15px;
+  border-radius: 9px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.json-preview-secondary {
+  border: 1px solid var(--news-line, var(--xhs-line, #dfe5ee));
+  background: #ffffff;
+  color: var(--news-ink, var(--xhs-ink, #172033));
+}
+
+.json-preview-primary {
+  border: 1px solid var(--news-blue, var(--xhs-blue, #2f73e8));
+  background: var(--news-blue, var(--xhs-blue, #2f73e8));
+  color: #ffffff;
+}
+
+.json-preview-primary:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.json-preview-status.is-success {
+  color: #16825d;
+}
+
+.json-preview-status.is-error {
+  color: #dc2626;
+}
+
+@media (max-width: 640px) {
+  .json-preview-backdrop {
+    align-items: end;
+    padding: 0;
+  }
+
+  .json-preview-dialog {
+    width: 100%;
+    max-height: 92vh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .json-preview-content textarea {
+    height: 52vh;
+  }
+
+  .json-preview-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .json-preview-footer > div,
+  .json-preview-footer button {
+    width: 100%;
+  }
+}
