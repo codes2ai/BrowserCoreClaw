@@ -102,9 +102,12 @@ import {
   MESSAGE_STOP_FEATURE_RUNNER,
   MESSAGE_VALIDATE_FEATURE_RUNNER
 } from "./runner-messages.js";
+import { installTransferController } from "./transfer-controller.js";
+import { MESSAGE_RECONCILE_TRANSFER_DATA } from "./transfer-messages.js";
 
 const DASHBOARD_PATH = "sidepanel.html";
 let dashboardOpenPromise = null;
+const transferController = installTransferController().controller;
 
 function callChrome(callbackApi) {
   return new Promise((resolve, reject) => {
@@ -190,7 +193,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     [MESSAGE_VALIDATE_FEATURE_RUNNER]: validateFeatureRunnerRequest,
     [MESSAGE_EXECUTE_FEATURE_RUNNER]: executeFeatureRunner,
     [MESSAGE_STOP_FEATURE_RUNNER]: stopFeatureRunner,
-    [MESSAGE_GET_FEATURE_RUNNER_TASK]: getFeatureRunnerTask
+    [MESSAGE_GET_FEATURE_RUNNER_TASK]: getFeatureRunnerTask,
+    [MESSAGE_RECONCILE_TRANSFER_DATA]: () => transferController.reconcile()
   };
   const handler = handlers[message?.type];
   if (!handler) {

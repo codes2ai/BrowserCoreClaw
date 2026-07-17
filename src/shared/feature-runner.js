@@ -177,6 +177,7 @@ export function createBatchFeatureRunner(definition) {
     activeSessions.set(taskId, session);
     const startedAtMs = Date.now();
     const items = [];
+    const inputResults = [];
     const rowsByKey = new Map();
     const rowsWithoutKey = [];
     let resultCount = 0;
@@ -278,6 +279,13 @@ export function createBatchFeatureRunner(definition) {
                 error: ""
               };
               items.push(item);
+              inputResults.push({
+                input: inputValue,
+                index,
+                round,
+                status: item.status,
+                data: normalizedRows
+              });
               await report({ phase: "item_finished", ...item });
             } catch (error) {
               if (session.stopped || context.signal?.aborted || error?.code === "BROWSER_CORE_CLAW_RUNNER_STOPPED") {
@@ -296,6 +304,14 @@ export function createBatchFeatureRunner(definition) {
                   error: "任务已停止"
                 };
                 items.push(item);
+                inputResults.push({
+                  input: inputValue,
+                  index,
+                  round,
+                  status: item.status,
+                  data: [],
+                  error: item.error
+                });
                 await report({ phase: "item_finished", ...item });
                 return;
               }
@@ -315,6 +331,14 @@ export function createBatchFeatureRunner(definition) {
                 error: error?.message || String(error)
               };
               items.push(item);
+              inputResults.push({
+                input: inputValue,
+                index,
+                round,
+                status: item.status,
+                data: [],
+                error: item.error
+              });
               await report({ phase: "item_finished", ...item });
             } finally {
               session.activeItemRunIds.delete(itemRunId);
@@ -357,9 +381,16 @@ export function createBatchFeatureRunner(definition) {
         finishedAt: new Date().toISOString(),
         durationMs: Date.now() - startedAtMs,
         items,
+        inputResults,
         data
       };
-      await report({ phase: "task_finished", ...result, data: undefined, items: undefined });
+      await report({
+        phase: "task_finished",
+        ...result,
+        data: undefined,
+        items: undefined,
+        inputResults: undefined
+      });
       return result;
     } finally {
       activeSessions.delete(taskId);
@@ -385,6 +416,12 @@ export function createBatchFeatureRunner(definition) {
     supportsPolling,
     normalizeParameters,
     validate: normalizeParameters,
+    isValidInput(value) {
+      const normalized = String(value ?? "").trim();
+      return Boolean(normalized) && (
+        typeof definition.validateInput !== "function" || Boolean(definition.validateInput(normalized))
+      );
+    },
     getRowKey,
     mergeRow,
     run,

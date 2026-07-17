@@ -96,7 +96,8 @@ export async function runXiaohongshuProfilePageCommand(command, options = {}) {
       notes,
       noteCardCount: getNoteCards().length,
       capturedAt: new Date().toISOString(),
-      pageUrl: location.href
+      pageUrl: location.href,
+      rawPageText: String(document.body?.innerText || "").trim()
     };
   };
 

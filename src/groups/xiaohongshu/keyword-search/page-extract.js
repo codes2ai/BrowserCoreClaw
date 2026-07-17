@@ -95,7 +95,12 @@ export async function runXiaohongshuSearchPageCommand(command, options = {}) {
       });
       if (results.length >= maximum) break;
     }
-    return { results, capturedAt: new Date().toISOString(), pageUrl: location.href };
+    return {
+      results,
+      capturedAt: new Date().toISOString(),
+      pageUrl: location.href,
+      rawPageText: String(document.body?.innerText || "").trim()
+    };
   };
   const applyFilters = async (filters) => {
     const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));

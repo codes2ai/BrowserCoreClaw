@@ -14,6 +14,31 @@ function normalizeKey(value) {
   return String(value ?? "").trim();
 }
 
+function runnerOutputs(row) {
+  const value = row?.canonical?.platformExtra?.runnerOutputs;
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function preserveRunnerOutputs(previous, next) {
+  const previousOutputs = runnerOutputs(previous);
+  if (!previousOutputs || !next || typeof next !== "object") return next;
+  const nextOutputs = runnerOutputs(next);
+  return {
+    ...next,
+    canonical: {
+      ...(next.canonical && typeof next.canonical === "object" ? next.canonical : previous.canonical),
+      platformExtra: {
+        ...(previous?.canonical?.platformExtra || {}),
+        ...(next?.canonical?.platformExtra || {}),
+        runnerOutputs: {
+          ...previousOutputs,
+          ...(nextOutputs || {})
+        }
+      }
+    }
+  };
+}
+
 /**
  * 合并由同一功能存储的数据行，并返回真正新增的唯一键，供任务记录统计。
  */
@@ -47,7 +72,7 @@ export function mergeDataRowsByKey({
     const previous = replacementsByKey.get(key) || existingByKey.get(key);
     if (previous && !shouldUpdate) continue;
     if (!existingByKey.has(key)) addedKeys.add(key);
-    replacementsByKey.set(key, mergeRow(previous, row));
+    replacementsByKey.set(key, preserveRunnerOutputs(previous, mergeRow(previous, row)));
   }
 
   return {

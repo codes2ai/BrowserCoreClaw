@@ -161,6 +161,7 @@ export function extractGoogleNewsResults(options) {
     query: url.searchParams.get("q") || queryInput?.value || "",
     href: location.href,
     capturedAt: new Date().toISOString(),
+    rawPageText: String(document.body?.innerText || "").trim(),
     resultCount: results.length,
     results
   };

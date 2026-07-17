@@ -195,7 +195,13 @@ export async function runWeiboPageCommand(command, options = {}) {
       });
       if (posts.length >= maximum) break;
     }
-    return { posts, postCardCount: getPostCards().length, capturedAt: new Date().toISOString(), pageUrl: location.href };
+    return {
+      posts,
+      postCardCount: getPostCards().length,
+      capturedAt: new Date().toISOString(),
+      pageUrl: location.href,
+      rawPageText: String(document.body?.innerText || "").trim()
+    };
   };
   const inspectDetail = () => {
     const card = getDetailCard();
@@ -242,14 +248,20 @@ export async function runWeiboPageCommand(command, options = {}) {
         mediaUrls: Array.from(new Set(media)).join(" | ")
       },
       capturedAt: new Date().toISOString(),
-      pageUrl: location.href
+      pageUrl: location.href,
+      rawPageText: String(document.body?.innerText || "").trim()
     };
   };
 
   if (command === "inspect") return inspect();
   if (command === "expand-profile-details") return expandProfileDetails();
   if (command === "extract-posts") return extractPosts(options.limit);
-  if (command === "extract-profile") return { profile: getProfile(), capturedAt: new Date().toISOString(), pageUrl: location.href };
+  if (command === "extract-profile") return {
+    profile: getProfile(),
+    capturedAt: new Date().toISOString(),
+    pageUrl: location.href,
+    rawPageText: String(document.body?.innerText || "").trim()
+  };
   if (command === "inspect-detail") return inspectDetail();
   if (command === "extract-detail") return extractDetail();
   if (command === "scroll") {

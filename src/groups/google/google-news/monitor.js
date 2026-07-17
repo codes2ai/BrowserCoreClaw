@@ -26,6 +26,8 @@ import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
 import { formatLocalDateTime, normalizePublishedDateTime } from "../../../shared/date-normalizer.js";
 import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
+import { createBoundRunnerDataActions } from "../../../shared/bound-runner-data-actions.js";
+import { mergeBoundRunnerResultsIntoSourceRows } from "../../../shared/bound-runner-result-merge.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -69,6 +71,8 @@ import {
   updateFeatureRunnerDraft
 } from "../../../shared/feature-runner-panel.js";
 import { renderPageParametersCard } from "../../../shared/page-parameters.js";
+import { withCanonicalRecord } from "../../../shared/canonical-data.js";
+import { renderFieldGuide } from "../../../shared/field-guide.js";
 
 const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
 const FEATURE_KEY = "google/google-news";
@@ -90,6 +94,9 @@ const DATA_COLUMNS = Object.freeze([
   { key: "publishedAt", label: "发布时间" },
   { key: "collectedAt", label: "采集时间" },
   { key: "url", label: "链接", type: "link" }
+]);
+const GUIDE_FIELDS = Object.freeze([
+  "keyword", "title", "description", "source", "publishedAt", "publishedAtRaw", "url", "collectedAt"
 ]);
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
@@ -620,10 +627,7 @@ function renderGuideModal(state) {
             <li><strong>填写关键词</strong><span>支持逐条编辑、批量弹窗粘贴或 JSON 参数方式。</span></li>
             <li><strong>点击运行</strong><span>标签页会依次打开 Google 新闻结果；开启循环监控后会按周期持续运行，直到手动停止。</span></li>
           </ol>
-          <div class="news-schema-box">
-            <strong>采集字段</strong>
-            <code>keyword · title · description · source · publishedAt · url · collectedAt</code>
-          </div>
+          ${renderFieldGuide({ fields: GUIDE_FIELDS, entityType: "content", contentType: "news", escapeHtml })}
         </div>
         <footer>
           <button class="news-primary-button" type="button" data-action="close-guide">知道了</button>
@@ -753,7 +757,8 @@ function renderData(state) {
             escapeHtml,
             emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，Google 新闻结果会显示在这里",
             emptyClass: "news-table-empty",
-            longCellClass: "news-description-cell"
+            longCellClass: "news-description-cell",
+            actionColumn: state.boundRunnerActions?.tableColumn(exportRows, escapeHtml, filteredRows)
           })}
         </table>
       </div>
@@ -882,7 +887,7 @@ function normalizeStoredDataRow(row) {
     ? formatLocalDateTime(row.publishedAtTimestamp)
     : normalizePublishedDateTime(publishedAtRaw, { referenceDate: capturedAt });
   const collectedAt = capturedAt ? formatLocalDateTime(capturedAt) : "";
-  return {
+  return withCanonicalRecord(FEATURE_KEY, {
     ...row,
     description: row.description || row.desc || "",
     time: publishedAt,
@@ -890,7 +895,7 @@ function normalizeStoredDataRow(row) {
     publishedAtRaw,
     collectedAt,
     capturedAt
-  };
+  });
 }
 
 function mergeDataRows(state, keyword, data, task) {
@@ -902,7 +907,7 @@ function mergeDataRows(state, keyword, data, task) {
     const publishedAt = publishedAtTimestamp
       ? formatLocalDateTime(publishedAtTimestamp)
       : normalizePublishedDateTime(publishedAtRaw, { referenceDate: capturedAt });
-    return {
+    return withCanonicalRecord(FEATURE_KEY, {
       id: `${keyword}|${result.url || result.title}`,
       keyword,
       title: result.title || "",
@@ -915,8 +920,9 @@ function mergeDataRows(state, keyword, data, task) {
       publishedAtTimestamp,
       collectedAt,
       url: result.url || "",
-      capturedAt
-    };
+      capturedAt,
+      rawPageText: result.rawPageText || data?.rawPageText || ""
+    });
   });
   const merged = mergeDataRowsByKey({
     currentRows: state.dataRows,
@@ -991,6 +997,26 @@ export async function mountGoogleNewsMonitor(container, context) {
   const render = () => {
     if (!disposed) container.innerHTML = renderPage(state, context);
   };
+  state.boundRunnerActions = createBoundRunnerDataActions({
+    sourceFeatureId: FEATURE_KEY,
+    targets: context?.boundRunnerTargets,
+    onResult({ target, response }) {
+      const merged = mergeBoundRunnerResultsIntoSourceRows({
+        sourceFeatureId: FEATURE_KEY,
+        target,
+        rows: state.dataRows,
+        response
+      });
+      if (merged.updatedCount) {
+        state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+        saveState(state);
+      }
+    },
+    onNotice(notice) {
+      if (notice) state.notice = notice;
+      render();
+    }
+  });
 
   const closeBatch = () => {
     state.batchOpen = false;
@@ -1536,6 +1562,11 @@ export async function mountGoogleNewsMonitor(container, context) {
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.action;
+
+    if (action === "run-bound-runner") {
+      await state.boundRunnerActions?.run(button.dataset.boundRunnerTarget, button.dataset.boundRunnerRowIndex);
+      return;
+    }
 
     if (action === "run") {
       startRun().catch((error) => {

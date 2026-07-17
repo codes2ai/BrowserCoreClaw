@@ -91,6 +91,60 @@
   color: #1d5fc4;
   background: #edf5ff;
 }
+
+.bound-runner-action-cell {
+  min-width: 112px;
+  white-space: nowrap;
+}
+
+.bound-runner-actions {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.bound-runner-action {
+  display: grid;
+  min-width: 86px;
+  padding: 6px 8px;
+  border: 1px solid #b8d4c4;
+  border-radius: 7px;
+  cursor: pointer;
+  background: #f1faf4;
+  color: #176345;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.25;
+  text-align: left;
+}
+
+.bound-runner-action:hover:not(:disabled) {
+  border-color: #6eae8b;
+  background: #e5f5eb;
+}
+
+.bound-runner-action small {
+  max-width: 140px;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #5b7769;
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bound-runner-action:disabled {
+  cursor: not-allowed;
+  border-color: #d9e2dc;
+  background: #f5f7f5;
+  color: #9aa69f;
+}
+
+.bound-runner-action:disabled small {
+  color: #aab3ad;
+}
 .input-list-pagination {
   display: flex;
   align-items: center;

@@ -71,6 +71,14 @@ function inferColumnType(column) {
   return "text";
 }
 
+function normalizeActionColumn(value) {
+  if (!value || typeof value !== "object" || typeof value.render !== "function") return null;
+  return {
+    label: String(value.label || "操作"),
+    className: String(value.className || "data-table-action-cell")
+  };
+}
+
 export function renderConfiguredDataTable({
   rows,
   columns,
@@ -78,15 +86,18 @@ export function renderConfiguredDataTable({
   escapeHtml = (value) => String(value ?? ""),
   emptyText = "暂无数据",
   emptyClass = "xhs-table-empty",
-  longCellClass = "xhs-description-cell"
+  longCellClass = "xhs-description-cell",
+  actionColumn = null
 } = {}) {
   const visibleColumns = getVisibleDataColumns(columns, visibility);
   const normalizedRows = asRows(rows);
-  const header = `<thead><tr>${visibleColumns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead>`;
+  const normalizedActionColumn = normalizeActionColumn(actionColumn);
+  const totalColumns = visibleColumns.length + (normalizedActionColumn ? 1 : 0);
+  const header = `<thead><tr>${visibleColumns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}${normalizedActionColumn ? `<th class="${escapeHtml(normalizedActionColumn.className)}">${escapeHtml(normalizedActionColumn.label)}</th>` : ""}</tr></thead>`;
   if (!normalizedRows.length) {
-    return `${header}<tbody><tr><td class="${escapeHtml(emptyClass)}" colspan="${Math.max(1, visibleColumns.length)}">${escapeHtml(emptyText)}</td></tr></tbody>`;
+    return `${header}<tbody><tr><td class="${escapeHtml(emptyClass)}" colspan="${Math.max(1, totalColumns)}">${escapeHtml(emptyText)}</td></tr></tbody>`;
   }
-  const body = normalizedRows.map((row) => `<tr>${visibleColumns.map((column) => {
+  const body = normalizedRows.map((row, index) => `<tr>${visibleColumns.map((column) => {
     const rawValue = row?.[column.key] ?? "";
     const value = String(rawValue ?? "").trim();
     const type = inferColumnType(column);
@@ -100,7 +111,7 @@ export function renderConfiguredDataTable({
       return `<td class="${escapeHtml(longCellClass)}" title="${escapeHtml(value)}">${escapeHtml(value || "-")}</td>`;
     }
     return `<td>${escapeHtml(value || "-")}</td>`;
-  }).join("")}</tr>`).join("");
+  }).join("")}${normalizedActionColumn ? `<td class="${escapeHtml(normalizedActionColumn.className)}">${actionColumn.render(row, index)}</td>` : ""}</tr>`).join("");
   return `${header}<tbody>${body}</tbody>`;
 }
 

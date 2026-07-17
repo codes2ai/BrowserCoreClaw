@@ -26,6 +26,9 @@ export const mountDouyinProfilePostsMonitor = createWeiboProfileMonitor({
   guideInputText: "输入一个或多个抖音博主主页链接，格式为 <code>https://www.douyin.com/user/用户ID</code>。",
   guideWaitText: "程序会确认主页资料和作品列表连续稳定后，再开始读取并在需要时滚动加载。",
   fieldList: "videoId · text · likes · cover · url",
+  fieldKeys: ["profileUrl", "pageOrder", "videoId", "text", "likes", "cover", "url", "capturedAt"],
+  entityType: "content",
+  contentType: "video",
   dataSummary: "作品按抖音主页卡片原始顺序保存。",
   emptyDataText: "运行后，抖音主页作品会显示在这里",
   dataFilters: [

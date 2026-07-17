@@ -85,6 +85,52 @@ final result: passed
 
 ---
 
+# Design QA — 新增通道弹窗（2026-07-17）
+
+## Evidence
+
+- Source visual truth: `/Users/hmcm/work/codex/BrowserCoreClaw/.qa-artifacts/channel-inline-source.png`
+- Browser-rendered implementation: `/Users/hmcm/work/codex/BrowserCoreClaw/.qa-artifacts/channel-modal-desktop.png`
+- Browser preview: `http://127.0.0.1:4208/sidepanel.html`；桌面视口 1280 × 720，响应式视口 390 × 844。
+- State: 数据传输 / 通道 / 点击“新增通道”；API 类型表单，通道名称为默认值，其他配置未提交。
+
+## Full-view comparison evidence
+
+源界面中的新增表单以内联卡片插入通道标题和列表之间，打开后会把列表整体向下推。实现保留同一套字段、类型按钮、提示文案和底部操作，但将表单放入居中的遮罩弹窗；通道页标题、列表和“新增通道”入口保持原位，页面层级不再因创建操作重排。
+
+## Focused region comparison evidence
+
+同屏检查确认弹窗中的 API / MongoDB 类型选择、三个即将支持的 Webhook 占位、通道名称、状态、POST 地址、请求头、POST 示例和保存说明均与源表单一致。没有新增图片或图标资产，因此不需要额外的图片局部对照。
+
+## Findings
+
+No actionable P0, P1, or P2 visual, responsive, accessibility, or core-interaction findings remain.
+
+- Fonts and typography: 沿用通道页现有系统字体、10px 英文眉题、16px 弹窗标题和 11–12px 表单层级，未改变字段文案与字重关系。
+- Spacing and layout rhythm: 桌面弹窗为 780 × 591 px，完整位于 1280 × 720 视口内；标题、滚动表单和底部动作使用独立三段结构。390 × 844 下弹窗边界为 x=10–380，表单改为单列且没有文档级横向溢出。
+- Colors and visual tokens: 复用既有墨绿按钮、浅绿色表单面、白色弹窗、细边框、阴影与半透明遮罩，没有引入新色板。
+- Image quality and asset fidelity: 本交互不含图片、Logo 或非标准图标，未使用占位图、手绘 SVG 或 CSS 图形替代视觉资产。
+- Copy and content: 所有原字段、类型、占位示例和“仅保存配置，不会发起网络请求”说明完整保留；校验错误现在显示在弹窗内部。
+- Accessibility: 弹窗具备 `role="dialog"`、`aria-modal="true"`、标题与描述关联；打开后聚焦通道名称，Escape 或取消关闭后焦点返回对应的新增/编辑入口，弹窗期间页面滚动被锁定。
+
+## Primary interactions tested
+
+- 点击“新增通道”后只出现一个“新增通道”对话框，页面列表不再被内联表单推移。
+- 缺少 POST 地址时点击保存，弹窗保留并显示“请填写 API 的 POST 请求地址。”，焦点转到对应字段。
+- 填写 POST 地址后保存成功，通道计数从 0 更新为 1，列表出现新通道并显示成功提示。
+- 点击新通道的“编辑”以同一弹窗打开，标题切换为“编辑通道”；取消后焦点返回该通道的编辑入口。
+- Escape 关闭新增弹窗后，滚动锁解除并把焦点还给“新增通道”。
+- 最新浏览器验收无 warning/error 日志；`npm run check` 与 `git diff --check` 通过。
+
+## Comparison history
+
+- P2 before: 新增表单以内联卡片插入页面，打开后改变列表位置并显著增加页面高度。Fix: 将现有表单移入固定遮罩弹窗，通道页保持稳定。Post-fix evidence: `.qa-artifacts/channel-modal-desktop.png`。
+- P2 before: 初次弹窗实现通过异步帧聚焦，在应用内浏览器的点击路径中焦点可能回落到页面。Fix: 打开和关闭时同步设置焦点，并保留下一帧兜底。Post-fix evidence: 新增弹窗初始活动字段为 `name`，Escape 后活动入口为 `new-channel`。
+
+final result: passed
+
+---
+
 # Design QA — 数据标识详情弹窗（2026-07-17）
 
 ## Evidence

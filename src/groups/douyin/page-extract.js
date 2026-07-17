@@ -154,7 +154,12 @@ export async function runDouyinPageCommand(command, options = {}) {
   };
 
   if (command === "inspect-profile") return inspectProfile();
-  if (command === "extract-profile") return { profile: getProfile(), capturedAt: new Date().toISOString(), pageUrl: location.href };
+  if (command === "extract-profile") return {
+    profile: getProfile(),
+    capturedAt: new Date().toISOString(),
+    pageUrl: location.href,
+    rawPageText: String(document.body?.innerText || "").trim()
+  };
   if (command === "extract-posts") {
     const maximum = Math.max(1, Math.min(100, Number(options.limit) || 20));
     const seen = new Set();
@@ -166,10 +171,21 @@ export async function runDouyinPageCommand(command, options = {}) {
       posts.push(post);
       if (posts.length >= maximum) break;
     }
-    return { posts, postCardCount: postLinks().length, capturedAt: new Date().toISOString(), pageUrl: location.href };
+    return {
+      posts,
+      postCardCount: postLinks().length,
+      capturedAt: new Date().toISOString(),
+      pageUrl: location.href,
+      rawPageText: String(document.body?.innerText || "").trim()
+    };
   }
   if (command === "inspect-detail") return inspectDetail();
-  if (command === "extract-detail") return { detail: getDetail(), capturedAt: new Date().toISOString(), pageUrl: location.href };
+  if (command === "extract-detail") return {
+    detail: getDetail(),
+    capturedAt: new Date().toISOString(),
+    pageUrl: location.href,
+    rawPageText: String(document.body?.innerText || "").trim()
+  };
   if (command === "scroll") {
     const list = document.querySelector('[data-e2e="user-post-list"]');
     window.scrollTo({ top: Math.max(document.documentElement.scrollHeight, list?.scrollHeight || 0), behavior: "smooth" });

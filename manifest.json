@@ -20,6 +20,10 @@
     "https://www.douyin.com/*",
     "https://v.douyin.com/*"
   ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
   "background": {
     "service_worker": "src/background/service-worker.js",
     "type": "module"

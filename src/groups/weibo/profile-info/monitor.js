@@ -14,6 +14,8 @@ export const mountWeiboProfileInfoMonitor = createWeiboProfileMonitor({
   pipelineText: "无需登录前置检查。程序打开微博公开主页，等待资料区稳定后读取头像、昵称、简介及互动统计。",
   guideIntro: "此功能仅采集微博公开资料，不依赖登录状态，也不会读取该博主的博文。",
   fieldList: "cover · avatar · nickname · gender · membershipBadges · bio · profileDescription · following · followers · engagement · yesterdayPosts · yesterdayReads · yesterdayInteractions · videoTotalViews · influenceRanks · serviceUnit · newsServiceLicense · serviceCategory · friendCount · profileDetailLines · profileCardText",
+  fieldKeys: ["profileUrl", "profileId", "cover", "avatar", "nickname", "gender", "membershipBadges", "bio", "profileDescription", "following", "followers", "engagement", "yesterdayPosts", "yesterdayReads", "yesterdayInteractions", "videoTotalViews", "influenceRanks", "serviceUnit", "newsServiceLicense", "serviceCategory", "friendCount", "profileDetailLines", "profileCardText", "capturedAt"],
+  entityType: "profile",
   dataSummary: "每个主页只保留最新一条博主资料。",
   emptyDataText: "运行后，微博博主公开资料会显示在这里",
   dataFilters: [

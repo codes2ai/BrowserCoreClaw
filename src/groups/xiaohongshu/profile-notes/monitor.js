@@ -21,6 +21,8 @@ import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
 import { normalizeXiaohongshuLikes } from "../likes-normalizer.js";
 import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
+import { createBoundRunnerDataActions } from "../../../shared/bound-runner-data-actions.js";
+import { mergeBoundRunnerResultsIntoSourceRows } from "../../../shared/bound-runner-result-merge.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -69,6 +71,8 @@ import {
   TASK_EXECUTION_TYPE_MANUAL
 } from "../../../shared/task-record-type.js";
 import { renderPageParametersCard } from "../../../shared/page-parameters.js";
+import { withCanonicalRecord } from "../../../shared/canonical-data.js";
+import { renderFieldGuide } from "../../../shared/field-guide.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileV1";
 const FEATURE_KEY = "xiaohongshu/profile-notes";
@@ -91,6 +95,9 @@ const DATA_COLUMNS = Object.freeze([
   { key: "noteCover", label: "封面", type: "image" },
   { key: "noteUrl", label: "博文链接", type: "link" },
   { key: "collectedAt", label: "采集时间" }
+]);
+const GUIDE_FIELDS = Object.freeze([
+  "profileUrl", "pageOrder", "noteId", "noteTitle", "noteAuthor", "noteLikes", "noteCover", "noteUrl", "capturedAt"
 ]);
 const DEFAULT_PROFILE_URLS = [""];
 const DEFAULT_OPTIONS = Object.freeze({
@@ -543,7 +550,7 @@ function renderData(state) {
       ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的博文数据表格">
         <table class="xhs-table xhs-data-table">
-          ${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，主页博文卡片会显示在这里" })}
+          ${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，主页博文卡片会显示在这里", actionColumn: state.boundRunnerActions?.tableColumn(exportRows, escapeHtml, filteredRows) })}
         </table>
       </div>
     </section>
@@ -571,7 +578,7 @@ function renderGuide(state) {
         <li><strong>确认登录</strong><span>进入功能前会确认当前 Chrome Profile 的小红书登录状态。</span></li>
         <li><strong>填写主页</strong><span>输入一个或多个 <code>/user/profile/</code> 主页链接。</span></li>
         <li><strong>运行并导出</strong><span>程序会等待页面稳定、滚动补齐笔记并去重，数据页支持筛选、复制 JSON 和导出 CSV 表格。</span></li>
-      </ol><div class="xhs-schema-box"><strong>采集字段</strong><code>pageOrder · noteId · noteTitle · noteAuthor · noteLikes · noteUrl · noteCover · collectedAt</code></div></div>
+      </ol>${renderFieldGuide({ fields: GUIDE_FIELDS, entityType: "content", contentType: "note", escapeHtml })}</div>
       <footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer>
     </section></div>
   `;
@@ -631,7 +638,7 @@ function renderPage(state, context) {
 
 function buildPostRows(data) {
   const notes = Array.isArray(data?.notes) ? data.notes : [];
-  return notes.map((note, index) => ({
+  return notes.map((note, index) => withCanonicalRecord(FEATURE_KEY, {
     id: String(note.noteId || note.url || index),
     pageOrder: Number(note.order) || index + 1,
     noteId: note.noteId || "",
@@ -640,7 +647,8 @@ function buildPostRows(data) {
     noteLikes: normalizeXiaohongshuLikes(note.likes),
     noteCover: note.cover || "",
     noteUrl: note.url || "",
-    capturedAt: data?.capturedAt || new Date().toISOString()
+    capturedAt: data?.capturedAt || new Date().toISOString(),
+    rawPageText: note.rawPageText || data?.rawPageText || ""
   }));
 }
 
@@ -727,6 +735,26 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
   const render = () => {
     if (!disposed) container.innerHTML = renderPage(state, context);
   };
+  state.boundRunnerActions = createBoundRunnerDataActions({
+    sourceFeatureId: FEATURE_KEY,
+    targets: context?.boundRunnerTargets,
+    onResult({ target, response }) {
+      const merged = mergeBoundRunnerResultsIntoSourceRows({
+        sourceFeatureId: FEATURE_KEY,
+        target,
+        rows: state.dataRows,
+        response
+      });
+      if (merged.updatedCount) {
+        state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+        saveState(state);
+      }
+    },
+    onNotice(notice) {
+      if (notice) state.notice = notice;
+      render();
+    }
+  });
   const closeTaskDetails = () => { state.taskDetailRecordId = ""; render(); };
   const openTaskDetails = (recordId) => {
     state.batchOpen = false;
@@ -942,6 +970,10 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.action;
+    if (action === "run-bound-runner") {
+      await state.boundRunnerActions?.run(button.dataset.boundRunnerTarget, button.dataset.boundRunnerRowIndex);
+      return;
+    }
     if (await handleFeatureRunnerPanelAction(state.runnerPanel, action, {
       disabled: state.running,
       getParameters: () => buildProfileJsonParameters(state),

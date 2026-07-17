@@ -27,6 +27,8 @@ import {
 import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
 import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
+import { createBoundRunnerDataActions } from "../../../shared/bound-runner-data-actions.js";
+import { mergeBoundRunnerResultsIntoSourceRows } from "../../../shared/bound-runner-result-merge.js";
 import {
   applyItemLimit,
   formatLimitValue,
@@ -73,6 +75,8 @@ import {
   TASK_EXECUTION_TYPE_MANUAL
 } from "../../../shared/task-record-type.js";
 import { renderPageParametersCard } from "../../../shared/page-parameters.js";
+import { withCanonicalRecord } from "../../../shared/canonical-data.js";
+import { renderFieldGuide } from "../../../shared/field-guide.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileInfoV1";
 const FEATURE_KEY = "xiaohongshu/profile-info";
@@ -102,6 +106,9 @@ const DATA_COLUMNS = Object.freeze([
   { key: "likedAndCollected", label: "获赞与收藏" },
   { key: "profileUrl", label: "主页链接", type: "link" },
   { key: "collectedAt", label: "采集时间" }
+]);
+const GUIDE_FIELDS = Object.freeze([
+  "profileUrl", "profileId", "avatar", "nickname", "xiaohongshuId", "ipLocation", "bio", "tags", "following", "followers", "likedAndCollected", "capturedAt"
 ]);
 const DEFAULT_PROFILE_URLS = [""];
 const DEFAULT_OPTIONS = Object.freeze({ intervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS, intervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS, concurrency: DEFAULT_TASK_CONCURRENCY, forceUpdateData: false, polling: false, pollingMinutes: 10 });
@@ -300,7 +307,7 @@ function renderRecords(state) {
 function renderData(state) {
   const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
   const exportRows = buildXiaohongshuProfileInfoExportRows(filteredRows);
-  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每个主页仅保留最新一条博主资料。</p></div>${renderDataColumnSettingsPanel({ columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, expanded: state.dataColumnsOpen, escapeHtml })}</div>${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}<div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table">${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，博主信息会显示在这里" })}</table></div></section>`;
+  return `<section class="xhs-content-card xhs-table-page"><div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每个主页仅保留最新一条博主资料。</p></div>${renderDataColumnSettingsPanel({ columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, expanded: state.dataColumnsOpen, escapeHtml })}</div>${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}<div class="xhs-table-shell data" tabindex="0"><table class="xhs-table xhs-data-table">${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，博主信息会显示在这里", actionColumn: state.boundRunnerActions?.tableColumn(exportRows, escapeHtml, filteredRows) })}</table></div></section>`;
 }
 
 function renderBatchModal(state) {
@@ -310,7 +317,7 @@ function renderBatchModal(state) {
 
 function renderGuide(state) {
   if (!state.guideOpen) return "";
-  return `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="xhsInfoGuideTitle"><header><div><span>QUICK START</span><h2 id="xhsInfoGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">功能会复用当前 Chrome Profile 的小红书登录会话，按主页链接采集公开的博主资料。</p><ol><li><strong>确认登录</strong><span>进入功能前会确认当前 Chrome Profile 的小红书登录状态。</span></li><li><strong>填写主页</strong><span>输入一个或多个 <code>/user/profile/</code> 主页链接。</span></li><li><strong>运行并导出</strong><span>程序确认资料区稳定后保存一条博主资料，支持筛选、复制 JSON 和导出 CSV 表格。</span></li></ol><div class="xhs-schema-box"><strong>采集字段</strong><code>avatar · nickname · xiaohongshuId · ipLocation · bio · tags · following · followers · likedAndCollected</code></div></div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>`;
+  return `<div class="xhs-modal-backdrop" data-modal="guide"><section class="xhs-batch-modal xhs-guide-modal" role="dialog" aria-modal="true" aria-labelledby="xhsInfoGuideTitle"><header><div><span>QUICK START</span><h2 id="xhsInfoGuideTitle">使用说明</h2></div><button class="xhs-modal-close" type="button" data-action="close-guide" data-guide-autofocus aria-label="关闭">X</button></header><div class="xhs-guide"><p class="xhs-guide-intro">功能会复用当前 Chrome Profile 的小红书登录会话，按主页链接采集公开的博主资料。</p><ol><li><strong>确认登录</strong><span>进入功能前会确认当前 Chrome Profile 的小红书登录状态。</span></li><li><strong>填写主页</strong><span>输入一个或多个 <code>/user/profile/</code> 主页链接。</span></li><li><strong>运行并导出</strong><span>程序确认资料区稳定后保存一条博主资料，支持筛选、复制 JSON 和导出 CSV 表格。</span></li></ol>${renderFieldGuide({ fields: GUIDE_FIELDS, entityType: "profile", escapeHtml })}</div><footer><button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button></footer></section></div>`;
 }
 
 function renderTaskDetails(state) {
@@ -342,7 +349,12 @@ function mergeInfoRow(state, data, task) {
   if (!id) return 0;
   const merged = mergeDataRowsByKey({
     currentRows: state.dataRows,
-    incomingRows: [{ id, ...profile, capturedAt: data.capturedAt || new Date().toISOString() }],
+    incomingRows: [withCanonicalRecord(FEATURE_KEY, {
+      id,
+      ...profile,
+      capturedAt: data.capturedAt || new Date().toISOString(),
+      rawPageText: profile.rawPageText || data?.rawPageText || ""
+    })],
     getKey: (row) => row.id,
     forceUpdateData: state.forceUpdateData,
     mergeRow: (previous, row) => tagTaskDataRow({ ...previous, ...row }, task)
@@ -381,6 +393,26 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
     }
   };
   const render = () => { if (!disposed) container.innerHTML = renderPage(state, context); };
+  state.boundRunnerActions = createBoundRunnerDataActions({
+    sourceFeatureId: FEATURE_KEY,
+    targets: context?.boundRunnerTargets,
+    onResult({ target, response }) {
+      const merged = mergeBoundRunnerResultsIntoSourceRows({
+        sourceFeatureId: FEATURE_KEY,
+        target,
+        rows: state.dataRows,
+        response
+      });
+      if (merged.updatedCount) {
+        state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+        saveState(state);
+      }
+    },
+    onNotice(notice) {
+      if (notice) state.notice = notice;
+      render();
+    }
+  });
   const closeTask = () => { state.taskDetailRecordId = ""; render(); };
   const finishRecord = (recordId, startedAtMs, statusKey, resultCount = 0, addedCount = 0, error = "") => {
     const meta = STATUS[statusKey] || STATUS.error;
@@ -527,6 +559,10 @@ export async function mountXiaohongshuProfileInfoMonitor(container, context) {
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.action;
+    if (action === "run-bound-runner") {
+      await state.boundRunnerActions?.run(button.dataset.boundRunnerTarget, button.dataset.boundRunnerRowIndex);
+      return;
+    }
     if (await handleFeatureRunnerPanelAction(state.runnerPanel, action, {
       disabled: state.running,
       getParameters: () => buildProfileInfoJsonParameters(state),

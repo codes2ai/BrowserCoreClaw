@@ -164,6 +164,14 @@ function asInteger(value, fallback, min, max) {
   return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
 }
 
+function normalizeFieldKeys(value, allowedKeys = null) {
+  const allowed = allowedKeys instanceof Set ? allowedKeys : null;
+  return [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => String(item || "").trim())
+    .filter((item) => /^[a-zA-Z][a-zA-Z0-9_]{0,119}$/.test(item))
+    .filter((item) => !allowed || allowed.has(item)))];
+}
+
 export function getRunnerCapabilitySchema(featureId) {
   return RUNNER_CAPABILITY_SCHEMAS[String(featureId || "").trim()] || Object.freeze({
     inputKey: "inputs",
@@ -178,6 +186,10 @@ export function getDefaultRunnerBindingConfiguration(targetFeatureId) {
   const schema = getRunnerCapabilitySchema(targetFeatureId);
   return {
     outputFields: schema.outputFields.map((item) => item.key),
+    // 来源功能的输出字段。由运行器配置界面保存，用于后续把采集结果映射为目标输入。
+    sourceOutputFields: [],
+    // Runner 本身接收的数据输入；不包含页面参数、运行选项或调用参数。
+    inputFields: [schema.inputKey],
     parameters: {
       ...(schema.hasLimit ? { limit: schema.defaultLimit } : {}),
       concurrency: DEFAULT_TASK_CONCURRENCY,
@@ -193,9 +205,9 @@ export function normalizeRunnerBindingConfiguration(targetFeatureId, value = {})
   const defaults = getDefaultRunnerBindingConfiguration(targetFeatureId);
   const rawFields = Array.isArray(value?.outputFields) ? value.outputFields : defaults.outputFields;
   const allowedFields = new Set(schema.outputFields.map((item) => item.key));
-  const outputFields = [...new Set(rawFields
-    .map((item) => String(item || "").trim())
-    .filter((item) => allowedFields.has(item)))];
+  const outputFields = normalizeFieldKeys(rawFields, allowedFields);
+  const sourceOutputFields = normalizeFieldKeys(value?.sourceOutputFields);
+  const inputFields = normalizeFieldKeys(value?.inputFields, new Set([schema.inputKey]));
   const firstInterval = asInteger(
     value?.parameters?.intervalMinMs,
     defaults.parameters.intervalMinMs,
@@ -211,6 +223,8 @@ export function normalizeRunnerBindingConfiguration(targetFeatureId, value = {})
 
   return {
     outputFields: outputFields.length || !defaults.outputFields.length ? outputFields : defaults.outputFields,
+    sourceOutputFields,
+    inputFields: inputFields.length ? inputFields : defaults.inputFields,
     parameters: {
       ...(schema.hasLimit ? {
         limit: asInteger(value?.parameters?.limit, schema.defaultLimit, 1, 100)

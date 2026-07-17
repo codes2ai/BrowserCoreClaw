@@ -15,22 +15,52 @@ import {
 } from "../shared/global-settings.js";
 import {
   getRunnerCapabilitySchema,
-  normalizeRunnerBindingConfiguration,
-  RUNNER_BINDING_PARAMETER_LIMITS
+  normalizeRunnerBindingConfiguration
 } from "../shared/runner-capability-schema.js";
 import { getFeatureRunner } from "../runners/registry.js";
 import {
+  applyTransferStrategiesToRows,
   TRANSFER_STATUS,
   filterTransferDataRows,
-  filterTransferTaskRows,
   getTransferFilterOptions,
   loadTransferWorkspace,
-  paginateTransferRows
+  paginateTransferRows,
+  requestTransferDataReconcile
 } from "../shared/transfer-workspace.js";
+import {
+  compareTransferStrategies,
+  createTransferChannelDraft,
+  createTransferStrategyDraft,
+  DEFAULT_TRANSFER_BATCH_SIZE,
+  DEFAULT_TRANSFER_RETRY_COUNT,
+  getDefaultTransferSettings,
+  getTransferChannelTypeLabel,
+  getTransferStrategyPriority,
+  getTransferStrategyPriorityLabel,
+  getTransferStrategyTypeLabel,
+  isTransferChannelTypeAvailable,
+  isBuiltInTransferStrategy,
+  loadTransferSettings,
+  MAX_TRANSFER_BATCH_SIZE,
+  MAX_TRANSFER_RETRY_COUNT,
+  MAX_TRANSFER_STRATEGY_PRIORITY,
+  MIN_TRANSFER_BATCH_SIZE,
+  MIN_TRANSFER_RETRY_COUNT,
+  normalizeTransferSettings,
+  normalizeTransferStrategyPriority,
+  resolveTransferStrategyChannelIds,
+  saveTransferSettings,
+  TRANSFER_ACTIONS,
+  TRANSFER_CHANNEL_TYPES,
+  TRANSFER_STRATEGY_TYPES
+} from "../shared/transfer-settings.js";
 
 const CONFIG_PATH = "src/config/groups.json";
 const FEATURE_STYLE_ID = "active-feature-style";
 let activeTransferDataDetailClose = null;
+let transferSettingsSaveQueue = Promise.resolve();
+let transferSettingsSaveRevision = 0;
+let lastPersistedTransferSettings = null;
 
 const state = {
   config: null,
@@ -44,32 +74,27 @@ const state = {
   settingsTab: "basic",
   settingsDirty: false,
   settingsNotice: null,
-  runnerSourceFeatureId: "xiaohongshu/keyword-search",
-  runnerConfigTargetFeatureId: "xiaohongshu/post-detail",
+  runnerEditor: null,
+  featureRefreshing: false,
   query: "",
   transferWorkspace: null,
   transferLoading: false,
   transferNotice: null,
   transferTab: "data",
   transferDataFiltersOpen: false,
-  transferTaskFiltersOpen: false,
   transferDataPage: 1,
-  transferTaskPage: 1,
+  transferSettings: null,
+  transferSettingsNotice: null,
+  transferChannelEditor: null,
+  transferStrategyEditor: null,
   transferDataFilters: {
     query: "",
     platform: "__all__",
     feature: "__all__",
+    entityType: "__all__",
+    contentType: "__all__",
     localStatus: "__all__",
     transferStatus: "__all__",
-    dateStart: "",
-    dateEnd: ""
-  },
-  transferTaskFilters: {
-    query: "",
-    platform: "__all__",
-    feature: "__all__",
-    trigger: "__all__",
-    status: "__all__",
     dateStart: "",
     dateEnd: ""
   }
@@ -89,6 +114,48 @@ function extensionUrl(path) {
     return chrome.runtime.getURL(path);
   }
   return new URL(`../../${path}`, import.meta.url).href;
+}
+
+function callExtensionApi(callbackApi) {
+  return new Promise((resolve, reject) => callbackApi((result) => {
+    const error = globalThis.chrome?.runtime?.lastError;
+    if (error) reject(new Error(error.message));
+    else resolve(result);
+  }));
+}
+
+function getTransferApiOriginPattern(endpoint) {
+  let url;
+  try {
+    url = new URL(String(endpoint || "").trim());
+  } catch {
+    throw new Error("API POST 地址无效。");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("API POST 地址仅支持 HTTP 或 HTTPS。");
+  }
+  return `${url.origin}/*`;
+}
+
+function validateTransferApiHeaders(value) {
+  const source = String(value || "").trim();
+  if (!source) return;
+  let headers;
+  try {
+    headers = JSON.parse(source);
+  } catch {
+    throw new Error("API 请求头必须是有效的 JSON 对象。");
+  }
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) {
+    throw new Error("API 请求头必须是 JSON 对象。");
+  }
+}
+
+async function requestTransferApiOriginPermission(endpoint) {
+  const origin = getTransferApiOriginPattern(endpoint);
+  if (!globalThis.chrome?.runtime?.id || globalThis.location?.protocol !== "chrome-extension:") return true;
+  if (!chrome.permissions?.request) return false;
+  return Boolean(await callExtensionApi((done) => chrome.permissions.request({ origins: [origin] }, done)));
 }
 
 function validateConfig(config) {
@@ -140,46 +207,6 @@ function getRunnerFeatures() {
     }))) || [];
 }
 
-function getRunnerSourceFeatureId() {
-  const runnerFeatures = getRunnerFeatures();
-  if (!runnerFeatures.some((feature) => feature.id === state.runnerSourceFeatureId)) {
-    state.runnerSourceFeatureId = runnerFeatures.find((feature) => feature.id === "xiaohongshu/keyword-search")?.id
-      || runnerFeatures[0]?.id
-      || "";
-  }
-  return state.runnerSourceFeatureId;
-}
-
-function getRunnerTargetIds(sourceFeatureId = getRunnerSourceFeatureId()) {
-  const configured = state.settingsDraft?.runners?.callableByFeature?.[sourceFeatureId];
-  return Array.isArray(configured) ? configured : [];
-}
-
-function setRunnerTargetEnabled(sourceFeatureId, targetFeatureId, enabled) {
-  if (!sourceFeatureId || !targetFeatureId || sourceFeatureId === targetFeatureId) return;
-  const bindings = state.settingsDraft.runners.callableByFeature;
-  const targets = new Set(getRunnerTargetIds(sourceFeatureId));
-  if (enabled) {
-    targets.add(targetFeatureId);
-    state.runnerConfigTargetFeatureId = targetFeatureId;
-  } else {
-    targets.delete(targetFeatureId);
-    if (state.runnerConfigTargetFeatureId === targetFeatureId) {
-      state.runnerConfigTargetFeatureId = [...targets][0] || "";
-    }
-  }
-  if (targets.size) bindings[sourceFeatureId] = [...targets];
-  else delete bindings[sourceFeatureId];
-}
-
-function getRunnerConfigTargetFeatureId(targetFeatureIds = getRunnerTargetIds()) {
-  const targetIds = Array.isArray(targetFeatureIds) ? targetFeatureIds : [...targetFeatureIds];
-  if (!targetIds.includes(state.runnerConfigTargetFeatureId)) {
-    state.runnerConfigTargetFeatureId = targetIds[0] || "";
-  }
-  return state.runnerConfigTargetFeatureId;
-}
-
 function getDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId) {
   const stored = state.settingsDraft?.runners?.configurationByBinding?.[sourceFeatureId]?.[targetFeatureId];
   return normalizeRunnerBindingConfiguration(targetFeatureId, stored);
@@ -194,6 +221,104 @@ function setDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId, co
     targetFeatureId,
     configuration
   );
+}
+
+function getRunnerFeature(featureId, features = getRunnerFeatures()) {
+  return features.find((feature) => feature.id === featureId) || null;
+}
+
+function getRunnerBindings(features = getRunnerFeatures()) {
+  const sourceMap = state.settingsDraft?.runners?.callableByFeature || {};
+  const bindings = [];
+  Object.entries(sourceMap).forEach(([sourceFeatureId, targetFeatureIds]) => {
+    const source = getRunnerFeature(sourceFeatureId, features);
+    if (!source || !Array.isArray(targetFeatureIds)) return;
+    [...new Set(targetFeatureIds)].forEach((targetFeatureId) => {
+      const target = getRunnerFeature(targetFeatureId, features);
+      if (!target || source.id === target.id) return;
+      bindings.push({
+        source,
+        target,
+        configuration: getDraftRunnerBindingConfiguration(source.id, target.id)
+      });
+    });
+  });
+  return bindings.sort((left, right) => `${left.source.groupName}/${left.source.name}/${left.target.name}`
+    .localeCompare(`${right.source.groupName}/${right.source.name}/${right.target.name}`, "zh-CN"));
+}
+
+function getRunnerInputFields(featureId) {
+  const schema = getRunnerCapabilitySchema(featureId);
+  return [{ key: schema.inputKey, label: schema.inputLabel }];
+}
+
+function createRunnerEditor(binding = null) {
+  const source = binding?.source || null;
+  const target = binding?.target || null;
+  const sourceSchema = source ? getRunnerCapabilitySchema(source.id) : null;
+  const configuration = binding?.configuration || null;
+  const sourceOutputFields = configuration?.sourceOutputFields?.length
+    ? configuration.sourceOutputFields
+    : (sourceSchema?.outputFields || []).map((item) => item.key);
+  const targetInputFields = configuration?.inputFields?.length
+    ? configuration.inputFields
+    : (target ? getRunnerInputFields(target.id).map((item) => item.key) : []);
+  return {
+    mode: binding ? "edit" : "new",
+    step: 1,
+    originalSourceFeatureId: source?.id || "",
+    originalTargetFeatureId: target?.id || "",
+    sourceGroupId: source?.groupId || "",
+    sourceFeatureId: source?.id || "",
+    sourceOutputFields: [...sourceOutputFields],
+    targetGroupId: target?.groupId || "",
+    targetFeatureId: target?.id || "",
+    targetInputFields: [...targetInputFields]
+  };
+}
+
+function removeDraftRunnerBinding(sourceFeatureId, targetFeatureId) {
+  const runners = state.settingsDraft.runners;
+  const targets = Array.isArray(runners.callableByFeature?.[sourceFeatureId])
+    ? runners.callableByFeature[sourceFeatureId].filter((id) => id !== targetFeatureId)
+    : [];
+  if (targets.length) runners.callableByFeature[sourceFeatureId] = targets;
+  else delete runners.callableByFeature[sourceFeatureId];
+
+  if (runners.configurationByBinding?.[sourceFeatureId]) {
+    delete runners.configurationByBinding[sourceFeatureId][targetFeatureId];
+    if (!Object.keys(runners.configurationByBinding[sourceFeatureId]).length) {
+      delete runners.configurationByBinding[sourceFeatureId];
+    }
+  }
+}
+
+function saveDraftRunnerBinding(editor) {
+  const sourceId = String(editor?.sourceFeatureId || "").trim();
+  const targetId = String(editor?.targetFeatureId || "").trim();
+  if (!sourceId || !targetId || sourceId === targetId) {
+    throw new Error("请选择不同的来源功能和目标运行器。");
+  }
+  if (!editor.sourceOutputFields?.length) throw new Error("请至少选择一个来源输出字段。");
+  if (!editor.targetInputFields?.length) throw new Error("请至少选择一个运行器输入字段。");
+
+  const source = getRunnerFeature(sourceId);
+  const target = getRunnerFeature(targetId);
+  if (!source || !target) throw new Error("所选功能或运行器已不存在。");
+
+  if (editor.originalSourceFeatureId && editor.originalTargetFeatureId
+    && (editor.originalSourceFeatureId !== sourceId || editor.originalTargetFeatureId !== targetId)) {
+    removeDraftRunnerBinding(editor.originalSourceFeatureId, editor.originalTargetFeatureId);
+  }
+
+  const targetIds = new Set(state.settingsDraft.runners.callableByFeature[sourceId] || []);
+  targetIds.add(targetId);
+  state.settingsDraft.runners.callableByFeature[sourceId] = [...targetIds];
+
+  const configuration = getDraftRunnerBindingConfiguration(sourceId, targetId);
+  configuration.sourceOutputFields = [...editor.sourceOutputFields];
+  configuration.inputFields = [...editor.targetInputFields];
+  setDraftRunnerBindingConfiguration(sourceId, targetId, configuration);
 }
 
 function getAppName() {
@@ -255,12 +380,15 @@ function appTemplate(config, globalSettings) {
           <header class="transfer-header">
             <span class="page-kicker">DATA TRANSFER</span>
             <h1 id="transferTitle">数据传输</h1>
-            <p>聚合各功能的本地数据与远程归档任务；接入远程存储后可在此统一同步。</p>
+            <p>聚合全部本地采集数据，统一配置传输开关、通道与数据传输策略。</p>
           </header>
           <div id="transferRoot"></div>
         </section>
 
         <section id="featureView" class="feature-view" hidden>
+          <button id="refreshActiveFeature" class="feature-force-refresh" type="button" title="强制刷新功能页面" aria-label="强制刷新功能页面" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0 2 5.3M20 4v7h-7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+          </button>
           <div id="featureRoot"></div>
         </section>
       </main>
@@ -268,88 +396,126 @@ function appTemplate(config, globalSettings) {
   `;
 }
 
-function runnerConfigurationPanelTemplate(sourceFeatureId, targetFeature) {
-  if (!targetFeature) {
+function runnerGroupOptions(features, selectedGroupId, emptyLabel) {
+  const groups = [...new Map(features.map((feature) => [feature.groupId, feature.groupName])).entries()];
+  return `<option value="">${escapeHtml(emptyLabel)}</option>${groups.map(([id, name]) => `
+    <option value="${escapeHtml(id)}" ${id === selectedGroupId ? "selected" : ""}>${escapeHtml(name)}</option>
+  `).join("")}`;
+}
+
+function runnerFeatureOptions(features, groupId, selectedFeatureId, emptyLabel, excludeFeatureId = "") {
+  const available = features.filter((feature) => feature.groupId === groupId && feature.id !== excludeFeatureId);
+  return `<option value="">${escapeHtml(emptyLabel)}</option>${available.map((feature) => `
+    <option value="${escapeHtml(feature.id)}" ${feature.id === selectedFeatureId ? "selected" : ""}>${escapeHtml(feature.name)}</option>
+  `).join("")}`;
+}
+
+function runnerFieldChoices(fields, selectedValues, dataAttribute, emptyText) {
+  const selected = new Set(selectedValues || []);
+  if (!fields.length) return `<p class="settings-runner-wizard-empty">${escapeHtml(emptyText)}</p>`;
+  return `<div class="settings-runner-wizard-fields">
+    ${fields.map((field) => `
+      <label>
+        <input type="checkbox" value="${escapeHtml(field.key)}" ${dataAttribute} ${selected.has(field.key) ? "checked" : ""}>
+        <span aria-hidden="true">✓</span>
+        <span><strong>${escapeHtml(field.label)}</strong><small>${escapeHtml(field.key)}</small></span>
+      </label>
+    `).join("")}
+  </div>`;
+}
+
+function effectiveRunnerSourceOutputFields(binding) {
+  return binding.configuration.sourceOutputFields?.length
+    ? binding.configuration.sourceOutputFields
+    : getRunnerCapabilitySchema(binding.source.id).outputFields.map((field) => field.key);
+}
+
+function runnerFieldNames(featureId, keys) {
+  const labels = new Map(getRunnerCapabilitySchema(featureId).outputFields.map((field) => [field.key, field.label]));
+  getRunnerInputFields(featureId).forEach((field) => labels.set(field.key, field.label));
+  return (keys || []).map((key) => labels.get(key) || key);
+}
+
+function runnerBindingListTemplate(bindings) {
+  const rows = bindings.length ? bindings.map((binding) => {
+    const sourceFields = effectiveRunnerSourceOutputFields(binding);
+    const targetInputs = binding.configuration.inputFields?.length
+      ? binding.configuration.inputFields
+      : getRunnerInputFields(binding.target.id).map((field) => field.key);
     return `
-      <aside class="settings-runner-config-section" aria-labelledby="runner-config-title">
-        <header class="settings-runner-config-heading">
-          <div><h3 id="runner-config-title">字段配置</h3><p>选择并启用一个调用能力后进行配置。</p></div>
-        </header>
-        <div class="settings-runner-config-empty">
-          <strong>暂无已选能力</strong>
-          <span>在中间列表勾选目标能力，输出字段与调用参数会显示在这里。</span>
-        </div>
-      </aside>
+      <tr>
+        <td><strong>${escapeHtml(binding.source.groupName)} / ${escapeHtml(binding.source.name)}</strong><small>${escapeHtml(binding.source.id)}</small></td>
+        <td><span class="settings-runner-field-count">${sourceFields.length} 个字段</span><small>${escapeHtml(runnerFieldNames(binding.source.id, sourceFields).join("、"))}</small></td>
+        <td><strong>${escapeHtml(binding.target.groupName)} / ${escapeHtml(binding.target.name)}</strong><small>${escapeHtml(binding.target.id)}</small></td>
+        <td><span class="settings-runner-field-count input">${targetInputs.length} 个输入</span><small>${escapeHtml(runnerFieldNames(binding.target.id, targetInputs).join("、"))}</small></td>
+        <td class="settings-runner-list-actions"><button type="button" data-settings-action="edit-runner-binding" data-runner-source-id="${escapeHtml(binding.source.id)}" data-runner-target-id="${escapeHtml(binding.target.id)}">编辑</button><button type="button" class="danger" data-settings-action="remove-runner-binding" data-runner-source-id="${escapeHtml(binding.source.id)}" data-runner-target-id="${escapeHtml(binding.target.id)}">删除</button></td>
+      </tr>
     `;
-  }
-
-  const schema = getRunnerCapabilitySchema(targetFeature.id);
-  const configuration = getDraftRunnerBindingConfiguration(sourceFeatureId, targetFeature.id);
-  const selectedFields = new Set(configuration.outputFields);
-  const parameters = configuration.parameters;
-  const limits = RUNNER_BINDING_PARAMETER_LIMITS;
-
+  }).join("") : `<tr><td class="settings-runner-list-empty" colspan="5">尚未添加运行器。新增后可建立“来源功能 → 目标 Runner”的调用关系。</td></tr>`;
   return `
-    <aside class="settings-runner-config-section" aria-labelledby="runner-config-title">
-      <header class="settings-runner-config-heading">
-        <div><h3 id="runner-config-title">字段配置</h3><p>${escapeHtml(targetFeature.name)}</p></div>
-        <span>配置中</span>
+    <div class="settings-runner-list-table-shell" tabindex="0">
+      <table class="settings-runner-list-table">
+        <thead><tr><th>来源功能</th><th>输出字段</th><th>运行器</th><th>Runner 输入字段</th><th>操作</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function runnerWizardTemplate(editor, features) {
+  const source = getRunnerFeature(editor.sourceFeatureId, features);
+  const target = getRunnerFeature(editor.targetFeatureId, features);
+  const sourceFields = source ? getRunnerCapabilitySchema(source.id).outputFields : [];
+  const targetInputs = target ? getRunnerInputFields(target.id) : [];
+  const stepOne = editor.step === 1;
+  return `
+    <section class="settings-runner-wizard" aria-label="${editor.mode === "edit" ? "编辑运行器" : "新增运行器"}">
+      <header>
+        <div><span>${editor.mode === "edit" ? "EDIT RUNNER" : "NEW RUNNER"}</span><h3 id="settingsRunnerEditorTitle">${editor.mode === "edit" ? "编辑运行器" : "新增运行器"}</h3><p>按顺序选择来源能力和目标 Runner，页面参数与运行选项不会出现在字段选择中。</p></div>
+        <button class="settings-secondary-button" type="button" data-settings-action="cancel-runner-editor">取消</button>
       </header>
-      <div class="settings-runner-config-target">
-        <strong>${escapeHtml(targetFeature.name)}</strong>
-        <code>${escapeHtml(targetFeature.id)}</code>
-      </div>
-      <section class="settings-runner-config-block" aria-labelledby="runner-output-fields-title">
-        <header>
-          <div><h4 id="runner-output-fields-title">输出字段</h4><p>仅返回勾选的字段；数据主键会由系统保留。</p></div>
-          <button type="button" data-settings-action="select-all-runner-output-fields">全选</button>
-        </header>
-        <div class="settings-runner-output-fields">
-          ${schema.outputFields.map((item) => `
-            <label class="settings-runner-field-option">
-              <input type="checkbox" value="${escapeHtml(item.key)}" data-runner-output-field ${selectedFields.has(item.key) ? "checked" : ""}>
-              <span aria-hidden="true">✓</span>
-              <span><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.key)}</small></span>
-            </label>
-          `).join("")}
-        </div>
-      </section>
-      <section class="settings-runner-config-block" aria-labelledby="runner-parameters-title">
-        <header><div><h4 id="runner-parameters-title">调用参数</h4><p>应用于当前来源自动调用该能力时。</p></div></header>
-        <div class="settings-runner-parameter-list">
-          <div class="settings-runner-parameter-static">
-            <span>输入参数</span>
-            <strong>${escapeHtml(schema.inputLabel)}</strong>
-            <code>${escapeHtml(schema.inputKey)}</code>
-            <small>由来源能力的本轮结果自动生成</small>
+      <ol class="settings-runner-wizard-steps" aria-label="配置步骤">
+        <li class="${stepOne ? "active" : "complete"}"><strong>1</strong><span>选择功能与输出字段</span></li>
+        <li class="${stepOne ? "" : "active"}"><strong>2</strong><span>选择运行器与输入字段</span></li>
+      </ol>
+      ${stepOne ? `
+        <section class="settings-runner-wizard-step">
+          <header><h4>第一步：选择功能</h4><p>先选择来源分组和功能，再选择本轮采集结果中允许传递给 Runner 的输出字段。</p></header>
+          <div class="settings-runner-wizard-selects">
+            <label><span>来源分组</span><select data-runner-editor-field="sourceGroupId">${runnerGroupOptions(features, editor.sourceGroupId, "请选择分组")}</select></label>
+            <label><span>来源功能</span><select data-runner-editor-field="sourceFeatureId" ${editor.sourceGroupId ? "" : "disabled"}>${runnerFeatureOptions(features, editor.sourceGroupId, editor.sourceFeatureId, "请选择功能")}</select></label>
           </div>
-          ${schema.hasLimit ? `
-            <label class="settings-runner-parameter-control">
-              <span>单项结果数</span>
-              <input type="number" min="${limits.limit.min}" max="${limits.limit.max}" step="1" value="${parameters.limit}" data-runner-parameter="limit">
-              <small>${limits.limit.min}–${limits.limit.max} 条</small>
-            </label>
-          ` : ""}
-          <label class="settings-runner-parameter-control">
-            <span>并发数</span>
-            <input type="number" min="${limits.concurrency.min}" max="${limits.concurrency.max}" step="1" value="${parameters.concurrency}" data-runner-parameter="concurrency">
-            <small>${limits.concurrency.min}–${limits.concurrency.max} 个任务</small>
-          </label>
-          <div class="settings-runner-parameter-range">
-            <span>调用间隔</span>
-            <label><input type="number" min="${limits.interval.min}" max="${limits.interval.max}" step="100" value="${parameters.intervalMinMs}" data-runner-parameter="intervalMinMs"><small>最小 ms</small></label>
-            <i>—</i>
-            <label><input type="number" min="${limits.interval.min}" max="${limits.interval.max}" step="100" value="${parameters.intervalMaxMs}" data-runner-parameter="intervalMaxMs"><small>最大 ms</small></label>
+          <div class="settings-runner-wizard-field-section">
+            <div><strong>输出字段</strong><small>${source ? `${source.groupName} / ${source.name} 的采集结果字段` : "请先选择来源功能"}</small></div>
+            ${runnerFieldChoices(sourceFields, editor.sourceOutputFields, "data-runner-editor-output", "来源功能暂未定义可选择的输出字段。")}
           </div>
-          <label class="settings-runner-parameter-switch">
-            <input type="checkbox" data-runner-parameter="forceUpdateData" ${parameters.forceUpdateData ? "checked" : ""}>
-            <span aria-hidden="true"></span>
-            <span><strong>强制更新已有数据</strong><small>主键相同时也使用本次结果覆盖。</small></span>
-          </label>
-        </div>
+        </section>
+        <footer><span>已选 ${editor.sourceOutputFields.length} 个来源输出字段。</span><button class="settings-primary-button" type="button" data-settings-action="runner-editor-next">下一步</button></footer>
+      ` : `
+        <section class="settings-runner-wizard-step">
+          <header><h4>第二步：选择运行器</h4><p>只列出 Runner 本体接收的数据输入字段；页面参数、运行选项和调用参数不在此处配置。</p></header>
+          <div class="settings-runner-wizard-selects">
+            <label><span>运行器分组</span><select data-runner-editor-field="targetGroupId">${runnerGroupOptions(features.filter((feature) => feature.id !== editor.sourceFeatureId), editor.targetGroupId, "请选择分组")}</select></label>
+            <label><span>运行器功能</span><select data-runner-editor-field="targetFeatureId" ${editor.targetGroupId ? "" : "disabled"}>${runnerFeatureOptions(features, editor.targetGroupId, editor.targetFeatureId, "请选择运行器", editor.sourceFeatureId)}</select></label>
+          </div>
+          <div class="settings-runner-wizard-field-section">
+            <div><strong>运行器输入字段</strong><small>${target ? `${target.groupName} / ${target.name} 的 Runner 输入` : "请先选择运行器功能"}</small></div>
+            ${runnerFieldChoices(targetInputs, editor.targetInputFields, "data-runner-editor-input", "请先选择一个运行器功能。")}
+          </div>
+        </section>
+        <footer><button class="settings-secondary-button" type="button" data-settings-action="runner-editor-back">上一步</button><span>已选 ${editor.targetInputFields.length} 个 Runner 输入字段。</span><button class="settings-primary-button" type="button" data-settings-action="save-runner-binding">${editor.mode === "edit" ? "更新运行器" : "添加运行器"}</button></footer>
+      `}
+    </section>
+  `;
+}
+
+function runnerWizardModalTemplate(editor, features) {
+  return `
+    <div class="settings-runner-modal-backdrop" data-runner-editor-modal>
+      <section class="settings-runner-modal" role="dialog" aria-modal="true" aria-labelledby="settingsRunnerEditorTitle">
+        ${runnerWizardTemplate(editor, features)}
       </section>
-      <button class="settings-runner-config-reset" type="button" data-settings-action="reset-runner-binding-configuration">恢复此能力默认配置</button>
-    </aside>
+    </div>
   `;
 }
 
@@ -361,24 +527,8 @@ function settingsPanelTemplate() {
     ? `<div class="settings-notice ${escapeHtml(state.settingsNotice.tone)}" role="status">${escapeHtml(state.settingsNotice.text)}</div>`
     : "";
   const runnerFeatures = getRunnerFeatures();
-  const runnerSourceFeatureId = getRunnerSourceFeatureId();
-  const runnerSource = runnerFeatures.find((feature) => feature.id === runnerSourceFeatureId);
-  const runnerTargetIds = new Set(getRunnerTargetIds(runnerSourceFeatureId));
-  const runnerConfigTargetFeatureId = getRunnerConfigTargetFeatureId(runnerTargetIds);
-  const runnerConfigTarget = runnerFeatures.find((feature) => feature.id === runnerConfigTargetFeatureId);
-  const selectedRunnerTargets = runnerFeatures.filter((feature) => runnerTargetIds.has(feature.id));
-  const runnerSourcesByGroup = runnerFeatures.reduce((groups, feature) => {
-    if (!groups.has(feature.groupId)) groups.set(feature.groupId, { name: feature.groupName, features: [] });
-    groups.get(feature.groupId).features.push(feature);
-    return groups;
-  }, new Map());
-  const runnerTargetsByGroup = runnerFeatures
-    .filter((feature) => feature.id !== runnerSourceFeatureId)
-    .reduce((groups, feature) => {
-      if (!groups.has(feature.groupId)) groups.set(feature.groupId, { name: feature.groupName, features: [] });
-      groups.get(feature.groupId).features.push(feature);
-      return groups;
-    }, new Map());
+  const runnerBindings = getRunnerBindings(runnerFeatures);
+  const runnerEditorModal = state.runnerEditor ? runnerWizardModalTemplate(state.runnerEditor, runnerFeatures) : "";
   const panels = {
     basic: `
       <section class="settings-panel" aria-labelledby="settings-basic-title">
@@ -480,70 +630,14 @@ function settingsPanelTemplate() {
     runner: `
       <section class="settings-panel settings-runner-panel" aria-labelledby="settings-runner-title">
         <header class="settings-panel-header">
-          <div><h2 id="settings-runner-title">运行器</h2><p>配置功能之间允许调用的 Runner：一个来源功能可以绑定多个目标功能。</p></div>
+          <div><h2 id="settings-runner-title">运行器列表</h2><p>管理功能与目标 Runner 的调用映射；每一条记录都定义来源输出与 Runner 输入。</p></div>
           <span class="settings-scope-badge">固定配置</span>
         </header>
-        <div class="settings-runner-intro">
-          <strong>调用关系、输出字段与参数会统一保存。</strong>
-          <span>来源能力发起自动调用时，将按当前白名单和右侧配置执行。</span>
+        <div class="settings-runner-list-intro">
+          <div><strong>${runnerBindings.length} 条运行器配置</strong><span>新建采用两步选择：先选来源功能及输出字段，再选目标 Runner 及其输入字段。</span></div>
+          <button class="settings-primary-button" type="button" data-settings-action="new-runner-binding">新增运行器</button>
         </div>
-        <div class="settings-runner-workspace">
-          <aside class="settings-runner-sources" aria-labelledby="runner-source-list-title">
-            <header class="settings-runner-pane-heading">
-              <div><h3 id="runner-source-list-title">功能列表</h3><p>点击一个功能，配置它可调用的 Runner。</p></div>
-              <span>${runnerFeatures.length} 个功能</span>
-            </header>
-            <div class="settings-runner-source-groups">
-              ${[...runnerSourcesByGroup.values()].map((group) => `
-                <section class="settings-runner-source-group">
-                  <h4>${escapeHtml(group.name)}</h4>
-                  <div class="settings-runner-source-list">
-                    ${group.features.map((feature) => `<button class="settings-runner-source ${feature.id === runnerSourceFeatureId ? "is-selected" : ""}" type="button" data-settings-action="select-runner-source" data-source-feature-id="${escapeHtml(feature.id)}" aria-pressed="${feature.id === runnerSourceFeatureId}">
-                      <span><strong>${escapeHtml(feature.name)}</strong><small><code>${escapeHtml(feature.id)}</code></small></span>
-                      <span class="settings-runner-source-state" aria-hidden="true">${feature.id === runnerSourceFeatureId ? "已选" : ""}</span>
-                    </button>`).join("")}
-                  </div>
-                </section>
-              `).join("")}
-            </div>
-          </aside>
-          <section class="settings-runner-target-section" aria-labelledby="runner-target-list-title">
-            <header class="settings-runner-target-heading">
-              <div><h3 id="runner-target-list-title">可调用能力</h3><p>${runnerSource ? `当前来源：${runnerSource.groupName} / ${runnerSource.name}` : "暂无可配置的来源功能。"}</p></div>
-              <span>${runnerTargetIds.size} 个已启用</span>
-            </header>
-            <div class="settings-runner-current-source">
-              <span>来源 Runner</span><code>${escapeHtml(runnerSourceFeatureId || "-")}</code><span>点击下方能力可多选，选中结果会立即回显。</span>
-            </div>
-            <div class="settings-runner-selection-summary" aria-live="polite">
-              <strong>已选目标</strong>
-              <div>${selectedRunnerTargets.length ? selectedRunnerTargets.map((feature) => `<span>${escapeHtml(feature.name)}</span>`).join("") : "<em>暂未选择，点击下方能力进行配置。</em>"}</div>
-            </div>
-            <div class="settings-runner-target-groups">
-              ${runnerTargetsByGroup.size ? [...runnerTargetsByGroup.values()].map((group) => `
-                <section class="settings-runner-target-group">
-                  <h4>${escapeHtml(group.name)}</h4>
-                  <div class="settings-runner-target-list">
-                    ${group.features.map((feature) => `<div class="settings-runner-target ${runnerTargetIds.has(feature.id) ? "is-selected" : ""} ${feature.id === runnerConfigTargetFeatureId ? "is-configuring" : ""}">
-                      <label class="settings-runner-target-toggle" aria-label="${runnerTargetIds.has(feature.id) ? "停用" : "启用"} ${escapeHtml(feature.name)}">
-                        <input type="checkbox" value="${escapeHtml(feature.id)}" data-runner-target ${runnerTargetIds.has(feature.id) ? "checked" : ""}>
-                        <span class="settings-runner-target-check" aria-hidden="true">✓</span>
-                      </label>
-                      <button class="settings-runner-target-copy" type="button" data-settings-action="select-runner-config-target" data-target-feature-id="${escapeHtml(feature.id)}" aria-current="${feature.id === runnerConfigTargetFeatureId ? "true" : "false"}">
-                        <strong>${escapeHtml(feature.name)}</strong><small><code>${escapeHtml(feature.id)}</code></small>
-                      </button>
-                    </div>`).join("")}
-                  </div>
-                </section>
-              `).join("") : '<p class="settings-runner-empty">没有其他已注册的 Runner 可供选择。</p>'}
-            </div>
-          </section>
-          ${runnerConfigurationPanelTemplate(runnerSourceFeatureId, runnerConfigTarget)}
-        </div>
-        <footer class="settings-runner-footer">
-          <span>映射：<code>${escapeHtml(runnerSourceFeatureId || "-")}</code> → ${runnerTargetIds.size ? `${runnerTargetIds.size} 个 Runner` : "未配置目标"}</span>
-          <button class="settings-text-button" type="button" data-settings-action="clear-runner-targets" ${runnerTargetIds.size ? "" : "disabled"}>清空当前配置</button>
-        </footer>
+        ${runnerBindingListTemplate(runnerBindings)}
       </section>
     `
   };
@@ -564,12 +658,14 @@ function settingsPanelTemplate() {
         <button class="settings-primary-button" type="button" data-settings-action="save" ${state.settingsDirty ? "" : "disabled"}>保存设置</button>
       </div>
     </footer>
+    ${runnerEditorModal}
   `;
 }
 
 function renderSettings() {
   const root = document.getElementById("settingsRoot");
   if (root && state.settingsDraft) root.innerHTML = settingsPanelTemplate();
+  document.body.classList.toggle("has-settings-runner-modal", Boolean(state.runnerEditor));
 }
 
 function getTransferFeatureDescriptors() {
@@ -586,19 +682,61 @@ function getTransferFeatureDescriptors() {
   })).filter((item) => item.storageKey) || [];
 }
 
+function getResolvedTransferDataRows() {
+  const workspace = state.transferWorkspace || { isPreview: false, dataRows: [] };
+  const rows = workspace.dataRows || [];
+  const settings = state.transferSettings || getDefaultTransferSettings();
+  return applyTransferStrategiesToRows(rows, settings, {
+    preferPersisted: !workspace.isPreview,
+    preview: workspace.isPreview
+  });
+}
+
 function getTransferStatusMeta(status) {
   const statusMap = {
+    [TRANSFER_STATUS.PENDING]: { label: "待传输", tone: "pending" },
     [TRANSFER_STATUS.TRANSFERRING]: { label: "传输中", tone: "processing" },
     [TRANSFER_STATUS.SUCCESS]: { label: "成功", tone: "success" },
     [TRANSFER_STATUS.FAILED]: { label: "失败", tone: "error" },
     [TRANSFER_STATUS.NOT_REQUIRED]: { label: "无需传输", tone: "muted" }
   };
-  return statusMap[status] || statusMap[TRANSFER_STATUS.NOT_REQUIRED];
+  return statusMap[status] || statusMap[TRANSFER_STATUS.PENDING];
 }
 
 function transferStatusPill(status) {
   const meta = getTransferStatusMeta(status);
   return `<span class="transfer-status-pill ${meta.tone}">${meta.label}</span>`;
+}
+
+function transferStatusControl(row) {
+  const status = row?.transferStatus || TRANSFER_STATUS.PENDING;
+  if (status !== TRANSFER_STATUS.FAILED) return transferStatusPill(status);
+  const meta = getTransferStatusMeta(status);
+  return `<button class="transfer-status-pill ${meta.tone} transfer-status-button" type="button" data-transfer-action="open-transfer-failure" data-transfer-row-id="${escapeHtml(row.id)}" aria-haspopup="dialog" aria-label="查看传输失败原因：${escapeHtml(row.title)}" title="查看完整失败原因">${meta.label}</button>`;
+}
+
+function transferDecisionSummary(row) {
+  const decision = row?.transferDecision;
+  if (!decision) {
+    if (row?.transferStatus === TRANSFER_STATUS.SUCCESS) return "历史传输成功 · 无动作快照";
+    if (row?.transferStatus === TRANSFER_STATUS.FAILED) return row.transferErrorText || "历史传输失败 · 无动作快照";
+    if (row?.transferStatus === TRANSFER_STATUS.NOT_REQUIRED) return "无需传输 · 等待持久化动作快照";
+    return row?.transferDecisionSource === "unresolved" ? "等待后台策略判定" : "等待策略判定";
+  }
+  const prefix = row?.transferDecisionSource === "preview" ? "策略预览：" : "";
+  if (decision.action === TRANSFER_ACTIONS.CHANNEL) {
+    const channelNames = Array.isArray(decision.channelNames) ? decision.channelNames : [];
+    return `${prefix}${decision.strategyName || "默认策略"} → ${channelNames.join("、") || "待选择通道"}`;
+  }
+  const reasonLabels = {
+    transfer_disabled: "总开关关闭",
+    legacy_baseline: "历史数据兜底 · 无需传输",
+    strategy_no_channel: decision.strategyName || "无通道策略",
+    strategy_channel_unavailable: `${decision.strategyName || "指定通道策略"} · 无可用通道`,
+    default_channel_unavailable: "默认策略 · 无可用默认通道",
+    no_matching_strategy: "没有可用策略"
+  };
+  return `${prefix}${reasonLabels[decision.reason] || decision.strategyName || "无需传输"}`;
 }
 
 function formatTransferTime(value) {
@@ -613,54 +751,61 @@ function transferOptionMarkup(options, value, emptyLabel) {
   `).join("")}`;
 }
 
-function transferFilterFields(kind, rows) {
-  const isData = kind === "data";
-  const filters = isData ? state.transferDataFilters : state.transferTaskFilters;
+function transferDataFilterFields(rows) {
+  const filters = state.transferDataFilters;
   const featureOptions = getTransferFilterOptions(rows, "featureId", "featureName");
   const platformOptions = getTransferFilterOptions(rows, "platformId", "platformName");
-  const isOpen = isData ? state.transferDataFiltersOpen : state.transferTaskFiltersOpen;
-  const statusOptions = isData
-    ? [
-        { value: TRANSFER_STATUS.TRANSFERRING, label: "传输中" },
-        { value: TRANSFER_STATUS.SUCCESS, label: "成功" },
-        { value: TRANSFER_STATUS.FAILED, label: "失败" },
-        { value: TRANSFER_STATUS.NOT_REQUIRED, label: "无需传输" }
-      ]
-    : [
-        { value: TRANSFER_STATUS.TRANSFERRING, label: "传输中" },
-        { value: TRANSFER_STATUS.SUCCESS, label: "成功" },
-        { value: TRANSFER_STATUS.FAILED, label: "失败" },
-        { value: TRANSFER_STATUS.NOT_REQUIRED, label: "无需传输" }
-      ];
-  const triggerOptions = [
-    { value: "manual", label: "手动触发" },
-    { value: "runner", label: "运行器" },
-    { value: "local", label: "本地归档" }
-  ];
+  const entityTypeOptions = getTransferFilterOptions(rows, "entityType", "entityTypeLabel");
+  const contentTypeOptions = getTransferFilterOptions(rows, "contentType", "contentTypeLabel");
+  const isOpen = state.transferDataFiltersOpen;
 
   return `
     <div class="transfer-toolbar">
       <label class="transfer-search-field">
-        <span class="sr-only">搜索${isData ? "数据" : "任务"}</span>
-        <input type="search" placeholder="搜索标题、链接、功能或任务编号" value="${escapeHtml(filters.query)}" data-transfer-filter="query" data-transfer-kind="${kind}">
+        <span class="sr-only">搜索数据</span>
+        <input type="search" placeholder="搜索标题、链接或功能" value="${escapeHtml(filters.query)}" data-transfer-filter="query" data-transfer-kind="data">
       </label>
       <div class="transfer-toolbar-actions">
-        <button class="transfer-secondary-button" type="button" data-transfer-action="toggle-${kind}-filters" aria-expanded="${isOpen}">${isOpen ? "收起筛选" : "展开筛选"}</button>
+        <button class="transfer-secondary-button" type="button" data-transfer-action="toggle-data-filters" aria-expanded="${isOpen}">${isOpen ? "收起筛选" : "展开筛选"}</button>
         <button class="transfer-icon-button" type="button" data-transfer-action="refresh-transfer" aria-label="刷新本地数据" title="刷新本地数据">刷新</button>
       </div>
     </div>
-    <section class="transfer-filter-panel" ${isOpen ? "" : "hidden"} aria-label="${isData ? "数据" : "任务"}筛选条件">
+    <section class="transfer-filter-panel" ${isOpen ? "" : "hidden"} aria-label="数据筛选条件">
       <div class="transfer-filter-grid">
-        <label><span>平台</span><select data-transfer-filter="platform" data-transfer-kind="${kind}">${transferOptionMarkup(platformOptions, filters.platform, "全部平台")}</select></label>
-        <label><span>功能</span><select data-transfer-filter="feature" data-transfer-kind="${kind}">${transferOptionMarkup(featureOptions, filters.feature, "全部功能")}</select></label>
-        ${isData ? `<label><span>本地状态</span><select data-transfer-filter="localStatus" data-transfer-kind="${kind}"><option value="__all__">全部本地状态</option><option value="stored" ${filters.localStatus === "stored" ? "selected" : ""}>本地已保存</option></select></label>` : `<label><span>触发来源</span><select data-transfer-filter="trigger" data-transfer-kind="${kind}">${transferOptionMarkup(triggerOptions, filters.trigger, "全部来源")}</select></label>`}
-        <label><span>${isData ? "传输状态" : "任务状态"}</span><select data-transfer-filter="${isData ? "transferStatus" : "status"}" data-transfer-kind="${kind}">${transferOptionMarkup(statusOptions, isData ? filters.transferStatus : filters.status, "全部状态")}</select></label>
-        <label><span>${isData ? "采集开始日期" : "创建开始日期"}</span><input type="date" value="${escapeHtml(filters.dateStart)}" data-transfer-filter="dateStart" data-transfer-kind="${kind}"></label>
-        <label><span>${isData ? "采集结束日期" : "创建结束日期"}</span><input type="date" value="${escapeHtml(filters.dateEnd)}" data-transfer-filter="dateEnd" data-transfer-kind="${kind}"></label>
+        <label><span>平台</span><select data-transfer-filter="platform" data-transfer-kind="data">${transferOptionMarkup(platformOptions, filters.platform, "全部平台")}</select></label>
+        <label><span>功能</span><select data-transfer-filter="feature" data-transfer-kind="data">${transferOptionMarkup(featureOptions, filters.feature, "全部功能")}</select></label>
+        <label><span>数据类型</span><select data-transfer-filter="entityType" data-transfer-kind="data">${transferOptionMarkup(entityTypeOptions, filters.entityType, "全部类型")}</select></label>
+        <label><span>内容类型</span><select data-transfer-filter="contentType" data-transfer-kind="data">${transferOptionMarkup(contentTypeOptions, filters.contentType, "全部内容类型")}</select></label>
+        <label><span>本地状态</span><select data-transfer-filter="localStatus" data-transfer-kind="data"><option value="__all__">全部本地状态</option><option value="stored" ${filters.localStatus === "stored" ? "selected" : ""}>本地已保存</option></select></label>
+        <label><span>采集开始日期</span><input type="date" value="${escapeHtml(filters.dateStart)}" data-transfer-filter="dateStart" data-transfer-kind="data"></label>
+        <label><span>采集结束日期</span><input type="date" value="${escapeHtml(filters.dateEnd)}" data-transfer-filter="dateEnd" data-transfer-kind="data"></label>
       </div>
-      <footer class="transfer-filter-footer"><span>筛选仅影响当前列表与后续导出范围。</span><button type="button" data-transfer-action="clear-${kind}-filters">清空条件</button></footer>
+      <footer class="transfer-filter-footer"><span>筛选仅影响当前数据列表；传输状态由上方状态页签切换。</span><button type="button" data-transfer-action="clear-data-filters">清空条件</button></footer>
     </section>
   `;
+}
+
+function transferDataStatusTabs(dataRows) {
+  const countFilters = { ...state.transferDataFilters, transferStatus: "__all__" };
+  const scopedRows = filterTransferDataRows(dataRows, countFilters);
+  const activeStatus = state.transferDataFilters.transferStatus || "__all__";
+  const tabs = [
+    { value: "__all__", label: "全部" },
+    { value: TRANSFER_STATUS.PENDING, label: "待传输" },
+    { value: TRANSFER_STATUS.TRANSFERRING, label: "传输中" },
+    { value: TRANSFER_STATUS.SUCCESS, label: "成功" },
+    { value: TRANSFER_STATUS.FAILED, label: "失败" },
+    { value: TRANSFER_STATUS.NOT_REQUIRED, label: "无需传输" }
+  ];
+  return `<nav class="transfer-status-tabs" aria-label="数据传输状态">
+    ${tabs.map((tab) => {
+      const count = tab.value === "__all__"
+        ? scopedRows.length
+        : scopedRows.filter((row) => row.transferStatus === tab.value).length;
+      const isActive = activeStatus === tab.value;
+      return `<button type="button" class="${isActive ? "active" : ""}" data-transfer-data-status="${tab.value}" aria-pressed="${isActive}">${tab.label}<span>${count}</span></button>`;
+    }).join("")}
+  </nav>`;
 }
 
 function transferPagination(kind, pageState) {
@@ -706,53 +851,8 @@ function renderTransferDetailValue(value) {
   return `<span>${escapeHtml(text)}</span>`;
 }
 
-function openTransferDataDetail(row) {
-  if (!row || !globalThis.document?.body) return;
-  activeTransferDataDetailClose?.();
-
-  const raw = row.raw && typeof row.raw === "object" && !Array.isArray(row.raw) ? row.raw : {};
-  const fields = Object.entries(raw);
-  const previousFocus = document.activeElement;
+function mountTransferDetailDialog(backdrop, previousFocus) {
   const previousBodyOverflow = document.body.style.overflow;
-  const titleId = `transferDataDetailTitle-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
-  const backdrop = document.createElement("div");
-  backdrop.className = "transfer-data-detail-backdrop";
-  backdrop.dataset.transferDataDetail = "";
-  backdrop.innerHTML = `
-    <section class="transfer-data-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}">
-      <header class="transfer-data-detail-header">
-        <div>
-          <span>DATA DETAIL</span>
-          <h2 id="${titleId}">数据详情</h2>
-          <p>${escapeHtml(row.platformName)} / ${escapeHtml(row.featureName)}</p>
-        </div>
-        <button type="button" data-transfer-detail-close>关闭</button>
-      </header>
-      <div class="transfer-data-detail-content">
-        <section class="transfer-data-detail-summary" aria-label="数据标识">
-          <strong>${escapeHtml(row.title)}</strong>
-          ${getSafeTransferDetailUrl(row.identifier)
-            ? `<a href="${escapeHtml(getSafeTransferDetailUrl(row.identifier))}" target="_blank" rel="noreferrer">${escapeHtml(row.identifier)}</a>`
-            : `<code>${escapeHtml(row.identifier)}</code>`}
-        </section>
-        ${fields.length ? `
-          <dl class="transfer-data-detail-fields">
-            ${fields.map(([key, value]) => `
-              <div>
-                <dt><code>${escapeHtml(key)}</code></dt>
-                <dd>${renderTransferDetailValue(value)}</dd>
-              </div>
-            `).join("")}
-          </dl>
-        ` : '<div class="transfer-data-detail-no-fields">这条数据没有可展示的原始字段。</div>'}
-      </div>
-      <footer class="transfer-data-detail-footer">
-        <span>共 ${fields.length} 个字段</span>
-        <button type="button" data-transfer-detail-close>关闭详情</button>
-      </footer>
-    </section>
-  `;
-
   const close = () => {
     document.removeEventListener("keydown", handleKeydown, true);
     backdrop.remove();
@@ -761,9 +861,28 @@ function openTransferDataDetail(row) {
     if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
   };
   const handleKeydown = (event) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    close();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = [...backdrop.querySelectorAll('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      .filter((element) => !element.hidden && element.getClientRects().length);
+    if (!focusable.length) {
+      event.preventDefault();
+      backdrop.querySelector('[role="dialog"]')?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   };
 
   backdrop.addEventListener("click", (event) => {
@@ -776,21 +895,236 @@ function openTransferDataDetail(row) {
   globalThis.requestAnimationFrame?.(() => backdrop.querySelector("[data-transfer-detail-close]")?.focus());
 }
 
+function openTransferDataDetail(row) {
+  if (!row || !globalThis.document?.body) return;
+  activeTransferDataDetailClose?.();
+
+  const canonical = row.canonical && typeof row.canonical === "object" && !Array.isArray(row.canonical) ? row.canonical : {};
+  const raw = row.raw && typeof row.raw === "object" && !Array.isArray(row.raw) ? row.raw : {};
+  const canonicalFields = Object.entries(canonical);
+  const rawFields = Object.entries(raw).filter(([key]) => key !== "canonical");
+  const transferFields = [
+    ["totalAttemptCount", Number.isFinite(row.transferAttemptCount) ? row.transferAttemptCount : 0],
+    ...(row.transferArchiveState && typeof row.transferArchiveState === "object"
+      ? Object.entries(row.transferArchiveState).filter(([key]) => !["attemptCount", "totalAttemptCount", "attempts"].includes(key))
+      : [
+        ["status", row.transferStatus],
+        ["action", transferDecisionSummary(row)],
+        ["attemptAt", row.transferAttemptAt],
+        ["completedAt", row.transferCompletedAt],
+        ["updatedAt", row.transferUpdatedAt],
+        ["error", row.transferError],
+        ["deliveryUncertain", row.transferDeliveryUncertain],
+        ["decision", row.transferDecision],
+        ["channelResults", row.transferChannelResults]
+      ])
+  ];
+  const previousFocus = document.activeElement;
+  const titleId = `transferDataDetailTitle-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
+  const descriptionId = `transferDataDetailDescription-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
+  const backdrop = document.createElement("div");
+  backdrop.className = "transfer-data-detail-backdrop";
+  backdrop.dataset.transferDataDetail = "";
+  backdrop.innerHTML = `
+    <section class="transfer-data-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${descriptionId}" tabindex="-1">
+      <header class="transfer-data-detail-header">
+        <div>
+          <span>DATA DETAIL</span>
+          <h2 id="${titleId}">数据详情</h2>
+          <p id="${descriptionId}">${escapeHtml(row.platformName)} / ${escapeHtml(row.featureName)}</p>
+        </div>
+        <button type="button" data-transfer-detail-close>关闭</button>
+      </header>
+      <div class="transfer-data-detail-content">
+        <section class="transfer-data-detail-summary" aria-label="数据标识">
+          <strong>${escapeHtml(row.title)}</strong>
+          ${getSafeTransferDetailUrl(row.identifier)
+            ? `<a href="${escapeHtml(getSafeTransferDetailUrl(row.identifier))}" target="_blank" rel="noreferrer">${escapeHtml(row.identifier)}</a>`
+            : `<code>${escapeHtml(row.identifier)}</code>`}
+        </section>
+        <section class="transfer-data-detail-section">
+          <h3>${row.transferStatePersisted ? "传输执行快照" : "传输策略预览"}</h3>
+          <p>${row.transferStatePersisted ? "展示后台持久化的实际动作、通道执行结果与时间；成功或失败状态不会套用当前的新策略。" : "网页预览环境按当前策略即时演示，不代表已经执行远程传输。"}</p>
+          <dl class="transfer-data-detail-fields">
+            ${transferFields.map(([key, value]) => `
+              <div><dt><code>${escapeHtml(key)}</code></dt><dd>${renderTransferDetailValue(value)}</dd></div>
+            `).join("")}
+          </dl>
+        </section>
+        ${canonicalFields.length ? `
+          <section class="transfer-data-detail-section">
+            <h3>统一传输字段</h3>
+            <p>包含标准实体字段、平台扩展字段和完整页面原文。</p>
+            <dl class="transfer-data-detail-fields">
+              ${canonicalFields.map(([key, value]) => `
+                <div><dt><code>${escapeHtml(key)}</code></dt><dd>${renderTransferDetailValue(value)}</dd></div>
+              `).join("")}
+            </dl>
+          </section>
+        ` : ""}
+        ${rawFields.length ? `
+          <section class="transfer-data-detail-section">
+            <h3>功能原始字段</h3>
+            <p>保留功能页面当前使用的原始字段，便于兼容既有表格与导出。</p>
+          <dl class="transfer-data-detail-fields">
+            ${rawFields.map(([key, value]) => `
+              <div>
+                <dt><code>${escapeHtml(key)}</code></dt>
+                <dd>${renderTransferDetailValue(value)}</dd>
+              </div>
+            `).join("")}
+          </dl>
+          </section>
+        ` : '<div class="transfer-data-detail-no-fields">这条数据没有可展示的字段。</div>'}
+      </div>
+      <footer class="transfer-data-detail-footer">
+        <span>统一字段 ${canonicalFields.length} 个 · 原始字段 ${rawFields.length} 个</span>
+        <button type="button" data-transfer-detail-close>关闭详情</button>
+      </footer>
+    </section>
+  `;
+  mountTransferDetailDialog(backdrop, previousFocus);
+}
+
+function getTransferFailureChannelEntries(value) {
+  if (Array.isArray(value)) {
+    return value.map((result, index) => [result?.channelId || `channel-${index + 1}`, result]);
+  }
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value);
+}
+
+function getTransferFailureSnapshot(row) {
+  if (row?.transferArchiveState && typeof row.transferArchiveState === "object" && !Array.isArray(row.transferArchiveState)) {
+    return row.transferArchiveState;
+  }
+  return {
+    status: row?.transferStatus,
+    action: row?.transferDecision?.action || "",
+    reason: row?.transferDecision?.reason || "",
+    featureId: row?.featureId || "",
+    platformId: row?.platformId || "",
+    decision: row?.transferDecision || null,
+    channelResults: row?.transferChannelResults || {},
+    attemptCount: Number.isFinite(row?.transferAttemptCount) ? row.transferAttemptCount : 0,
+    error: row?.transferError || row?.transferErrorText || "",
+    deliveryUncertain: row?.transferDeliveryUncertain === true,
+    attemptedAt: row?.transferAttemptAt || "",
+    completedAt: row?.transferCompletedAt || "",
+    updatedAt: row?.transferUpdatedAt || ""
+  };
+}
+
+function openTransferFailureDetail(row) {
+  if (!row || row.transferStatus !== TRANSFER_STATUS.FAILED || !globalThis.document?.body) return;
+  activeTransferDataDetailClose?.();
+
+  const previousFocus = document.activeElement;
+  const snapshot = getTransferFailureSnapshot(row);
+  const rowChannelEntries = getTransferFailureChannelEntries(row.transferChannelResults);
+  const channelEntries = rowChannelEntries.length
+    ? rowChannelEntries
+    : getTransferFailureChannelEntries(snapshot.channelResults);
+  const primaryError = row.transferError || snapshot.error || row.transferErrorText || "未记录失败原因";
+  const overviewFields = [
+    ["recordKey", row.id],
+    ["status", row.transferStatus],
+    ["totalAttemptCount", Number.isFinite(row.transferAttemptCount) ? row.transferAttemptCount : 0],
+    ["deliveryUncertain", row.transferDeliveryUncertain === true],
+    ["firstAttemptAt", snapshot.attemptedAt || ""],
+    ["lastAttemptAt", row.transferAttemptAt || snapshot.lastAttemptAt || ""],
+    ["completedAt", row.transferCompletedAt || snapshot.completedAt || ""],
+    ["updatedAt", row.transferUpdatedAt || snapshot.updatedAt || ""],
+    ["decision", row.transferDecision || snapshot.decision || null]
+  ];
+  const titleId = `transferFailureDetailTitle-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
+  const descriptionId = `transferFailureDetailDescription-${globalThis.crypto?.randomUUID?.() || Date.now()}`;
+  const backdrop = document.createElement("div");
+  backdrop.className = "transfer-data-detail-backdrop transfer-failure-detail-backdrop";
+  backdrop.dataset.transferFailureDetail = "";
+  backdrop.innerHTML = `
+    <section class="transfer-data-detail-dialog transfer-failure-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${descriptionId}" tabindex="-1">
+      <header class="transfer-data-detail-header transfer-failure-detail-header">
+        <div>
+          <span>TRANSFER FAILURE</span>
+          <h2 id="${titleId}">传输失败详情</h2>
+          <p id="${descriptionId}">${escapeHtml(row.platformName)} / ${escapeHtml(row.featureName)} · 展示当前本地已保存的完整失败快照</p>
+        </div>
+        <button type="button" data-transfer-detail-close>关闭</button>
+      </header>
+      <div class="transfer-data-detail-content">
+        <section class="transfer-data-detail-summary transfer-failure-record-summary" aria-label="失败数据标识">
+          <strong>${escapeHtml(row.title)}</strong>
+          ${getSafeTransferDetailUrl(row.identifier)
+            ? `<a href="${escapeHtml(getSafeTransferDetailUrl(row.identifier))}" target="_blank" rel="noreferrer">${escapeHtml(row.identifier)}</a>`
+            : `<code>${escapeHtml(row.identifier)}</code>`}
+        </section>
+        <section class="transfer-failure-summary" aria-label="主要失败原因">
+          <header><span class="transfer-status-pill error">失败</span><strong>主要失败原因</strong></header>
+          <div class="transfer-failure-error">${renderTransferDetailValue(primaryError)}</div>
+        </section>
+        <section class="transfer-data-detail-section">
+          <h3>失败概览</h3>
+          <p>汇总这条数据的实际尝试次数、投递确定性、执行时间和命中策略。</p>
+          <dl class="transfer-data-detail-fields">
+            ${overviewFields.map(([key, value]) => `
+              <div><dt><code>${escapeHtml(key)}</code></dt><dd>${renderTransferDetailValue(value)}</dd></div>
+            `).join("")}
+          </dl>
+        </section>
+        <section class="transfer-data-detail-section">
+          <h3>通道执行结果</h3>
+          <p>展示所有通道的完整执行字段；顶层错误仅为汇总，具体失败原因以各通道记录为准。</p>
+          ${channelEntries.length ? `<div class="transfer-failure-channel-list">
+            ${channelEntries.map(([channelKey, result], index) => {
+              const detail = result && typeof result === "object" && !Array.isArray(result) ? result : { value: result };
+              const label = detail.channelName || detail.channelId || channelKey || `通道 ${index + 1}`;
+              return `<article class="transfer-failure-channel-card">
+                <header>
+                  <div><span>通道 ${index + 1}</span><strong>${escapeHtml(label)}</strong><code>${escapeHtml(channelKey)}</code></div>
+                  ${transferStatusPill(detail.status || TRANSFER_STATUS.FAILED)}
+                </header>
+                <dl class="transfer-data-detail-fields">
+                  ${Object.entries(detail).map(([key, value]) => `
+                    <div><dt><code>${escapeHtml(key)}</code></dt><dd>${renderTransferDetailValue(value)}</dd></div>
+                  `).join("")}
+                </dl>
+              </article>`;
+            }).join("")}
+          </div>` : '<div class="transfer-data-detail-no-fields">这条失败记录没有保存通道执行结果。</div>'}
+        </section>
+        <section class="transfer-data-detail-section">
+          <h3>完整失败快照</h3>
+          <p>按原始字段展示本地归档内容，不再应用列表中的单行省略。</p>
+          <div class="transfer-failure-raw">${renderTransferDetailValue(snapshot)}</div>
+        </section>
+      </div>
+      <footer class="transfer-data-detail-footer">
+        <span>通道 ${channelEntries.length} 个 · 实际尝试 ${Number.isFinite(row.transferAttemptCount) ? row.transferAttemptCount : 0} 次</span>
+        <button type="button" data-transfer-detail-close>关闭详情</button>
+      </footer>
+    </section>
+  `;
+  mountTransferDetailDialog(backdrop, previousFocus);
+}
+
 function transferDataTable(rows, pageState) {
   const body = rows.length ? rows.map((row) => `
     <tr>
       <td><span class="transfer-platform-name">${escapeHtml(row.platformName)}</span></td>
       <td>${escapeHtml(row.featureName)}</td>
+      <td>${escapeHtml(row.entityTypeLabel || row.entityType || "-")}${row.contentTypeLabel ? `<small class="transfer-content-type">${escapeHtml(row.contentTypeLabel)}</small>` : ""}</td>
       <td class="transfer-primary-cell"><button class="transfer-data-identifier" type="button" data-transfer-action="open-data-detail" data-transfer-row-id="${escapeHtml(row.id)}" aria-haspopup="dialog" aria-label="查看数据详情：${escapeHtml(row.title)}"><strong>${escapeHtml(row.title)}</strong><small>${escapeHtml(row.identifier)}</small></button></td>
       <td><time>${escapeHtml(formatTransferTime(row.collectedAt))}</time></td>
       <td><span class="transfer-local-status">本地已保存</span></td>
-      <td>${transferStatusPill(row.transferStatus)}</td>
+      <td class="transfer-attempt-count" title="${row.transferAttemptAt ? `最近尝试 ${escapeHtml(formatTransferTime(row.transferAttemptAt))}` : "尚未尝试"}"><strong>${escapeHtml(Number.isFinite(row.transferAttemptCount) ? row.transferAttemptCount : 0)}</strong><small>各通道合计</small></td>
+      <td class="transfer-action-cell">${transferStatusControl(row)}<small title="${escapeHtml([transferDecisionSummary(row), row.transferErrorText, row.transferAttemptAt ? `最近尝试 ${formatTransferTime(row.transferAttemptAt)}` : ""].filter(Boolean).join(" · "))}">${escapeHtml(transferDecisionSummary(row))}${row.transferErrorText ? ` · ${escapeHtml(row.transferErrorText)}` : ""}</small></td>
     </tr>
-  `).join("") : `<tr><td class="transfer-empty-cell" colspan="6">没有符合当前条件的数据。</td></tr>`;
+  `).join("") : `<tr><td class="transfer-empty-cell" colspan="8">没有符合当前条件的数据。</td></tr>`;
   return `
     <div class="transfer-table-shell" tabindex="0">
-      <table class="transfer-table">
-        <thead><tr><th>平台</th><th>功能</th><th>标题 / 唯一标识</th><th>采集时间</th><th>本地状态</th><th>传输状态</th></tr></thead>
+      <table class="transfer-table transfer-data-table">
+        <thead><tr><th>平台</th><th>功能</th><th>类型</th><th>标题 / 唯一标识</th><th>采集时间</th><th>本地状态</th><th title="各通道实际尝试次数之和">传输次数</th><th>传输状态 / 动作</th></tr></thead>
         <tbody>${body}</tbody>
       </table>
     </div>
@@ -798,48 +1132,422 @@ function transferDataTable(rows, pageState) {
   `;
 }
 
-function getTransferTriggerLabel(trigger) {
-  return ({ manual: "手动触发", runner: "运行器", local: "本地归档" })[trigger] || "未知来源";
-}
-
-function transferTaskTable(rows, pageState) {
-  const body = rows.length ? rows.map((row) => `
-    <tr>
-      <td class="transfer-task-id"><strong>${escapeHtml(row.id)}</strong>${row.error ? `<small class="transfer-task-error">${escapeHtml(row.error)}</small>` : ""}</td>
-      <td><span class="transfer-platform-name">${escapeHtml(row.platformName)}</span></td>
-      <td>${escapeHtml(row.featureName)}</td>
-      <td>${escapeHtml(getTransferTriggerLabel(row.trigger))}</td>
-      <td>${row.dataCount} 条</td>
-      <td><time>${escapeHtml(formatTransferTime(row.createdAt))}</time></td>
-      <td>${transferStatusPill(row.status)}</td>
-      <td>${row.status === TRANSFER_STATUS.NOT_REQUIRED ? "等待远程接入" : `${row.processed} / ${row.dataCount}`}</td>
-    </tr>
-  `).join("") : `<tr><td class="transfer-empty-cell" colspan="8">没有符合当前条件的传输任务。</td></tr>`;
-  return `
-    <div class="transfer-table-shell" tabindex="0">
-      <table class="transfer-table transfer-task-table">
-        <thead><tr><th>任务编号</th><th>平台</th><th>功能</th><th>触发来源</th><th>数据范围</th><th>创建时间</th><th>状态</th><th>进度 / 结果</th></tr></thead>
-        <tbody>${body}</tbody>
-      </table>
-    </div>
-    ${transferPagination("task", pageState)}
-  `;
-}
-
-function transferSummaryLabel(rows, type) {
+function transferSummaryLabel(rows) {
   const total = rows.length;
-  const statusKey = type === "data" ? "transferStatus" : "status";
   const counts = rows.reduce((result, row) => {
-    const status = row[statusKey] || TRANSFER_STATUS.NOT_REQUIRED;
+    const status = row.transferStatus || TRANSFER_STATUS.PENDING;
     result[status] = (result[status] || 0) + 1;
     return result;
   }, {});
-  const orderedStatuses = [TRANSFER_STATUS.TRANSFERRING, TRANSFER_STATUS.SUCCESS, TRANSFER_STATUS.FAILED, TRANSFER_STATUS.NOT_REQUIRED]
+  const orderedStatuses = [TRANSFER_STATUS.PENDING, TRANSFER_STATUS.TRANSFERRING, TRANSFER_STATUS.SUCCESS, TRANSFER_STATUS.FAILED, TRANSFER_STATUS.NOT_REQUIRED]
     .filter((status) => counts[status]);
-  return `<div class="transfer-list-summary"><strong>${type === "data" ? "数据" : "任务"} ${total} 条</strong>${orderedStatuses.map((status) => {
+  return `<div class="transfer-list-summary"><strong>数据 ${total} 条</strong>${orderedStatuses.map((status) => {
     const meta = getTransferStatusMeta(status);
     return `<span class="${meta.tone}">${meta.label} ${counts[status]}</span>`;
   }).join("")}</div>`;
+}
+
+function transferSettingsNotice() {
+  if (!state.transferSettingsNotice) return "";
+  return `<div class="transfer-settings-notice ${escapeHtml(state.transferSettingsNotice.tone)}" role="status">${escapeHtml(state.transferSettingsNotice.text)}</div>`;
+}
+
+function transferSettingsTemplate(settings) {
+  const defaults = getDefaultTransferSettings();
+  const enabled = settings.enabled === true;
+  const retryCount = Number.isInteger(Number(settings.retryCount)) ? Number(settings.retryCount) : Number(defaults.retryCount ?? DEFAULT_TRANSFER_RETRY_COUNT);
+  const batchSize = Number.isInteger(Number(settings.batchSize)) ? Number(settings.batchSize) : Number(defaults.batchSize ?? DEFAULT_TRANSFER_BATCH_SIZE);
+  const channels = Array.isArray(settings.channels) ? settings.channels : [];
+  const readyChannels = channels.filter((channel) => channel.enabled).length;
+  const strategies = Array.isArray(settings.strategies) ? settings.strategies : getDefaultTransferSettings().strategies;
+  const readyStrategies = strategies.filter((strategy) => strategy.enabled).length;
+  return `
+    <section class="transfer-config-page" aria-label="传输设置">
+      ${transferSettingsNotice()}
+      <header class="transfer-config-header">
+        <div>
+          <span>TRANSFER SETTINGS</span>
+          <h2>传输设置</h2>
+          <p>统一控制所有功能的数据传输动作。关闭时全部标记为无需传输；开启后按策略匹配并绑定目标通道。</p>
+        </div>
+        <span class="transfer-config-state ${enabled ? "enabled" : "disabled"}">${enabled ? "已开启" : "默认关闭"}</span>
+      </header>
+      <article class="transfer-setting-card">
+        <div class="transfer-setting-card-copy">
+          <strong>开启数据传输</strong>
+          <p>开启后仅对新采集数据按策略执行；启用前已有的数据保守归入无需传输。关闭时停止后续路由，并统一显示为无需传输。</p>
+        </div>
+        <label class="transfer-switch">
+          <input type="checkbox" data-transfer-setting="enabled" ${enabled ? "checked" : ""}>
+          <span aria-hidden="true"></span>
+          <b>${enabled ? "开启" : "关闭"}</b>
+        </label>
+      </article>
+      ${enabled ? `
+        <section class="transfer-execution-settings" aria-labelledby="transferExecutionSettingsTitle">
+          <header>
+            <div>
+              <strong id="transferExecutionSettingsTitle">执行参数</strong>
+              <p>仅在数据传输开启时生效；修改后会重新同步后台传输控制器。</p>
+            </div>
+          </header>
+          <div class="transfer-execution-setting-grid">
+            <label>
+              <span>重试次数</span>
+              <input type="number" min="${MIN_TRANSFER_RETRY_COUNT}" max="${MAX_TRANSFER_RETRY_COUNT}" step="1" required inputmode="numeric" value="${escapeHtml(retryCount)}" data-transfer-setting="retryCount">
+              <small>首次失败后的额外重试次数，范围 ${MIN_TRANSFER_RETRY_COUNT}–${MAX_TRANSFER_RETRY_COUNT}；默认 ${DEFAULT_TRANSFER_RETRY_COUNT}，即单通道最多尝试 ${DEFAULT_TRANSFER_RETRY_COUNT + 1} 次。</small>
+            </label>
+            <label>
+              <span>批量条数</span>
+              <input type="number" min="${MIN_TRANSFER_BATCH_SIZE}" max="${MAX_TRANSFER_BATCH_SIZE}" step="1" required inputmode="numeric" value="${escapeHtml(batchSize)}" data-transfer-setting="batchSize">
+              <small>单次请求最多包含的数据条数，范围 ${MIN_TRANSFER_BATCH_SIZE}–${MAX_TRANSFER_BATCH_SIZE}，默认 ${DEFAULT_TRANSFER_BATCH_SIZE}；不足一批会立即发送，不等待凑满。</small>
+            </label>
+          </div>
+        </section>
+      ` : ""}
+      <section class="transfer-setting-overview">
+        <article>
+          <span>通道</span>
+          <strong>${channels.length}</strong>
+          <small>已保存的传输通道</small>
+        </article>
+        <article>
+          <span>可用通道</span>
+          <strong>${readyChannels}</strong>
+          <small>通道自身处于启用状态</small>
+        </article>
+        <article>
+          <span>策略</span>
+          <strong>${strategies.length}</strong>
+          <small>${readyStrategies} 条已开启，包含默认策略</small>
+        </article>
+      </section>
+    </section>
+  `;
+}
+
+function getChannelConfigurationSummary(channel) {
+  if (channel.type === TRANSFER_CHANNEL_TYPES.MONGODB) {
+    const database = channel.config?.database || "未填写数据库";
+    const collection = channel.config?.collection || "未填写集合";
+    return `<strong>${escapeHtml(database)} / ${escapeHtml(collection)}</strong><small>${channel.config?.connectionString ? "已填写连接串" : "未填写连接串"}</small>`;
+  }
+  const endpoint = channel.config?.endpoint || "未填写 POST 地址";
+  return `<strong>POST</strong><small>${escapeHtml(endpoint)}</small>`;
+}
+
+function transferChannelEditorTemplate(editor) {
+  const channel = editor.channel;
+  const isMongo = channel.type === TRANSFER_CHANNEL_TYPES.MONGODB;
+  const titleId = "transferChannelEditorTitle";
+  const descriptionId = "transferChannelEditorDescription";
+  const channelTypes = [
+    TRANSFER_CHANNEL_TYPES.API,
+    TRANSFER_CHANNEL_TYPES.MONGODB,
+    TRANSFER_CHANNEL_TYPES.DINGTALK_WEBHOOK,
+    TRANSFER_CHANNEL_TYPES.FEISHU_WEBHOOK,
+    TRANSFER_CHANNEL_TYPES.WECHAT_WORK_WEBHOOK
+  ];
+  return `
+    <div class="transfer-channel-modal-backdrop" data-transfer-channel-modal>
+      <section class="transfer-channel-editor transfer-channel-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${descriptionId}">
+        <header>
+          <div>
+            <span>${editor.mode === "edit" ? "EDIT CHANNEL" : "NEW CHANNEL"}</span>
+            <h3 id="${titleId}">${editor.mode === "edit" ? "编辑通道" : "新增通道"}</h3>
+            <p id="${descriptionId}">${isMongo ? "MongoDB 配置仅作服务端适配预留，浏览器扩展不会直接连接数据库。" : "保存时会申请该 API 域名的访问权限；只对保存后新增并命中策略的数据执行 POST。"}</p>
+          </div>
+          <button type="button" class="transfer-secondary-button" data-transfer-action="cancel-channel-editor">取消</button>
+        </header>
+        <div class="transfer-channel-editor-body">
+          ${transferSettingsNotice()}
+          <div class="transfer-channel-type-picker" aria-label="通道类型">
+            ${channelTypes.map((type) => {
+              const available = isTransferChannelTypeAvailable(type);
+              const selected = channel.type === type;
+              return `<button type="button" class="${selected ? "active" : ""}" data-transfer-channel-type="${type}" ${available ? "" : "disabled"}>${escapeHtml(getTransferChannelTypeLabel(type))}${available ? "" : "<small>即将支持</small>"}</button>`;
+            }).join("")}
+          </div>
+          <div class="transfer-channel-form-grid">
+            <label><span>通道名称</span><input type="text" maxlength="80" placeholder="例如：生产归档 API" value="${escapeHtml(channel.name)}" data-transfer-channel-field="name"></label>
+            <label class="transfer-channel-enabled"><span>通道状态</span><select data-transfer-channel-field="enabled"><option value="true" ${channel.enabled ? "selected" : ""}>启用</option><option value="false" ${!channel.enabled ? "selected" : ""}>停用</option></select></label>
+            ${isMongo ? `
+              <label class="transfer-channel-span-2"><span>MongoDB 连接串</span><input type="password" autocomplete="off" placeholder="mongodb+srv://user:password@cluster.example.com" value="${escapeHtml(channel.config?.connectionString)}" data-transfer-channel-field="config.connectionString"></label>
+              <label><span>数据库</span><input type="text" placeholder="browser_core_claw" value="${escapeHtml(channel.config?.database)}" data-transfer-channel-field="config.database"></label>
+              <label><span>集合</span><input type="text" placeholder="records" value="${escapeHtml(channel.config?.collection)}" data-transfer-channel-field="config.collection"></label>
+            ` : `
+              <label class="transfer-channel-span-2"><span>POST 请求地址</span><input type="url" placeholder="https://api.example.com/v1/archive" value="${escapeHtml(channel.config?.endpoint)}" data-transfer-channel-field="config.endpoint"></label>
+              <label class="transfer-channel-span-2"><span>请求头（JSON，可选）</span><textarea rows="4" placeholder='{"Authorization":"Bearer &lt;token&gt;"}' data-transfer-channel-field="config.headers">${escapeHtml(channel.config?.headers)}</textarea></label>
+              <aside class="transfer-api-example"><strong>POST 示例</strong><code>POST https://api.example.com/v1/archive</code><pre>{ "records": [/* 统一数据字段 */] }</pre></aside>
+            `}
+          </div>
+        </div>
+        <footer>
+          <span>${isMongo ? "当前执行器不支持直连 MongoDB，请使用 HTTPS API 中转。" : "将以 application/json 发送统一数据字段。"}</span>
+          <button type="button" class="transfer-primary-button" data-transfer-action="save-channel">保存通道</button>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
+function transferChannelsTemplate(settings) {
+  const channels = Array.isArray(settings.channels) ? settings.channels : [];
+  const rows = channels.length ? channels.map((channel) => `
+    <tr>
+      <td class="transfer-channel-name"><span><strong>${escapeHtml(channel.name)}</strong>${channel.isDefault ? '<b class="transfer-channel-default">默认</b>' : ""}</span><small>${escapeHtml(channel.id)}</small></td>
+      <td><span class="transfer-channel-type">${escapeHtml(getTransferChannelTypeLabel(channel.type))}</span></td>
+      <td class="transfer-channel-summary">${getChannelConfigurationSummary(channel)}</td>
+      <td><span class="transfer-channel-state ${channel.enabled ? "enabled" : "disabled"}">${channel.enabled ? "已启用" : "已停用"}</span></td>
+      <td><time>${escapeHtml(formatTransferTime(channel.updatedAt))}</time></td>
+      <td class="transfer-channel-actions"><button type="button" data-transfer-action="edit-channel" data-transfer-channel-id="${escapeHtml(channel.id)}">编辑</button>${channel.isDefault ? "" : `<button type="button" data-transfer-action="set-default-channel" data-transfer-channel-id="${escapeHtml(channel.id)}">设为默认</button>`}<button type="button" data-transfer-action="toggle-channel" data-transfer-channel-id="${escapeHtml(channel.id)}">${channel.enabled ? "停用" : "启用"}</button><button type="button" class="danger" data-transfer-action="remove-channel" data-transfer-channel-id="${escapeHtml(channel.id)}">删除</button></td>
+    </tr>
+  `).join("") : `<tr><td class="transfer-empty-cell" colspan="6">暂未配置通道。API 通道可执行传输；MongoDB 配置需由服务端适配器接入。</td></tr>`;
+  return `
+    <section class="transfer-config-page" aria-label="传输通道">
+      ${state.transferChannelEditor ? "" : transferSettingsNotice()}
+      <header class="transfer-config-header transfer-channel-page-header">
+        <div>
+          <span>TRANSFER CHANNELS</span>
+          <h2>通道</h2>
+          <p>API 通道会接收命中策略的新数据；MongoDB 连接串仅保存为适配器配置，浏览器端不会直接连接。钉钉、飞书、企微 Webhook 先保留扩展位。</p>
+        </div>
+        <button type="button" class="transfer-primary-button" data-transfer-action="new-channel">新增通道</button>
+      </header>
+      ${state.transferChannelEditor ? transferChannelEditorTemplate(state.transferChannelEditor) : ""}
+      <div class="transfer-table-shell" tabindex="0">
+        <table class="transfer-table transfer-channel-table">
+          <thead><tr><th>通道名称</th><th>类型</th><th>配置摘要</th><th>状态</th><th>更新时间</th><th>操作</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function getTransferStrategyDataOptions() {
+  const features = getTransferFeatureDescriptors();
+  const platformMap = new Map();
+  features.forEach((feature) => {
+    if (!platformMap.has(feature.platformId)) {
+      platformMap.set(feature.platformId, {
+        id: feature.platformId,
+        name: feature.platformName,
+        featureCount: 0
+      });
+    }
+    platformMap.get(feature.platformId).featureCount += 1;
+  });
+  return {
+    platforms: [...platformMap.values()],
+    features: features.map((feature) => ({
+      id: feature.featureId,
+      name: feature.featureName,
+      platformId: feature.platformId,
+      platformName: feature.platformName
+    }))
+  };
+}
+
+function transferStrategyDataSummary(strategy, dataOptions) {
+  if (isBuiltInTransferStrategy(strategy)) {
+    return "<strong>全部未匹配数据</strong><small>未命中其他启用策略时兜底</small>";
+  }
+  const platformNames = strategy.platformIds.map((platformId) => (
+    dataOptions.platforms.find((platform) => platform.id === platformId)?.name || platformId
+  ));
+  const featureNames = strategy.featureIds.map((featureId) => (
+    dataOptions.features.find((feature) => feature.id === featureId)?.name || featureId
+  ));
+  return `<strong>${platformNames.length} 个平台 / ${featureNames.length} 个功能</strong><small>${escapeHtml(platformNames.join("、") || "未选择平台")} · ${escapeHtml(featureNames.join("、") || "未选择功能")}</small>`;
+}
+
+function transferStrategyChannelSummary(strategy, channels) {
+  if (isBuiltInTransferStrategy(strategy)) {
+    const defaultChannel = channels.find((channel) => channel.isDefault);
+    return defaultChannel
+      ? `<strong>${escapeHtml(defaultChannel.name)}</strong><small>动态绑定当前默认通道</small>`
+      : "<strong>默认通道未配置</strong><small>新增首个通道后自动绑定</small>";
+  }
+  if (strategy.type === TRANSFER_STRATEGY_TYPES.NO_CHANNEL) {
+    return "<strong>不进入通道</strong><small>匹配数据将停止传输</small>";
+  }
+  const channelIds = resolveTransferStrategyChannelIds(strategy, channels);
+  const channelNames = channelIds.map((channelId) => (
+    channels.find((channel) => channel.id === channelId)?.name || channelId
+  ));
+  return `<strong>${channelNames.length ? `${channelNames.length} 个指定通道` : "未绑定通道"}</strong><small>${escapeHtml(channelNames.join("、") || "请编辑策略后选择通道")}</small>`;
+}
+
+function transferStrategyMultiSelect({ kind, label, options, selectedIds, emptyText, disabled, openPicker }) {
+  const selected = new Set(selectedIds || []);
+  const selectedOptions = options.filter((option) => selected.has(option.id));
+  const summary = selectedOptions.length
+    ? `已选择 ${selectedOptions.length} 项`
+    : emptyText;
+  return `
+    <div class="transfer-strategy-field">
+      <span>${escapeHtml(label)}</span>
+      <details class="transfer-strategy-multiselect ${disabled ? "is-disabled" : ""}" name="transfer-strategy-picker" ${openPicker === kind && !disabled ? "open" : ""} ${disabled ? 'aria-disabled="true"' : ""}>
+        <summary><span>${escapeHtml(summary)}</span><b aria-hidden="true">⌄</b></summary>
+        <div class="transfer-strategy-options">
+          ${options.length ? options.map((option) => `
+            <label>
+              <input type="checkbox" value="${escapeHtml(option.id)}" data-transfer-strategy-choice="${escapeHtml(kind)}" ${selected.has(option.id) ? "checked" : ""}>
+              <span><strong>${escapeHtml(option.name)}</strong>${option.meta ? `<small>${escapeHtml(option.meta)}</small>` : ""}</span>
+            </label>
+          `).join("") : `<p>${escapeHtml(disabled ? emptyText : "暂无可选项")}</p>`}
+        </div>
+      </details>
+      ${selectedOptions.length ? `<small>${escapeHtml(selectedOptions.map((option) => option.name).join("、"))}</small>` : ""}
+    </div>
+  `;
+}
+
+function transferStrategyEditorTemplate(editor, settings) {
+  const strategy = editor.strategy;
+  const dataOptions = getTransferStrategyDataOptions();
+  const selectedPlatforms = new Set(strategy.platformIds);
+  const featureOptions = dataOptions.features
+    .filter((feature) => selectedPlatforms.has(feature.platformId))
+    .map((feature) => ({ id: feature.id, name: feature.name, meta: feature.platformName }));
+  const channelOptions = settings.channels.map((channel) => ({
+    id: channel.id,
+    name: channel.name,
+    meta: `${getTransferChannelTypeLabel(channel.type)} · ${channel.enabled ? "已启用" : "已停用"}${channel.isDefault ? " · 当前默认" : ""}`
+  }));
+  const isChannelStrategy = strategy.type === TRANSFER_STRATEGY_TYPES.CHANNEL;
+  const titleId = "transferStrategyEditorTitle";
+  const descriptionId = "transferStrategyEditorDescription";
+  return `
+    <div class="transfer-channel-modal-backdrop" data-transfer-strategy-modal>
+      <section class="transfer-channel-editor transfer-channel-dialog transfer-strategy-dialog" role="dialog" aria-modal="true" aria-labelledby="${titleId}" aria-describedby="${descriptionId}">
+        <header>
+          <div>
+            <span>${editor.mode === "edit" ? "EDIT STRATEGY" : "NEW STRATEGY"}</span>
+            <h3 id="${titleId}">${editor.mode === "edit" ? "编辑策略" : "新增策略"}</h3>
+            <p id="${descriptionId}">先按策略类型层级匹配；同类型内按数值优先级从大到小命中。</p>
+          </div>
+          <button type="button" class="transfer-secondary-button" data-transfer-action="cancel-strategy-editor">取消</button>
+        </header>
+        <div class="transfer-channel-editor-body transfer-strategy-editor-body">
+          ${transferSettingsNotice()}
+          <div class="transfer-strategy-form-grid">
+            <label class="transfer-strategy-name-field"><span>策略名称</span><input type="text" maxlength="80" placeholder="例如：重点数据不传输" value="${escapeHtml(strategy.name)}" data-transfer-strategy-field="name"></label>
+            <label class="transfer-strategy-priority-field"><span>优先级</span><input type="number" min="0" max="${MAX_TRANSFER_STRATEGY_PRIORITY}" step="1" inputmode="numeric" value="${escapeHtml(strategy.priority ?? 0)}" data-transfer-strategy-field="priority"><small>同类型内数值越大越先命中</small></label>
+            <div class="transfer-strategy-status-field">
+              <span>状态</span>
+              <label class="transfer-switch"><input type="checkbox" data-transfer-strategy-field="enabled" ${strategy.enabled ? "checked" : ""}><span aria-hidden="true"></span><b>${strategy.enabled ? "开启" : "关闭"}</b></label>
+            </div>
+            <section class="transfer-strategy-form-section" aria-labelledby="strategy-data-title">
+              <header><strong id="strategy-data-title">选择数据</strong><small>平台与功能支持多选；功能选项会随平台联动。</small></header>
+              <div class="transfer-strategy-linked-fields">
+                ${transferStrategyMultiSelect({
+                  kind: "platform",
+                  label: "平台",
+                  options: dataOptions.platforms.map((platform) => ({ id: platform.id, name: platform.name, meta: `${platform.featureCount} 个功能` })),
+                  selectedIds: strategy.platformIds,
+                  emptyText: "请选择平台",
+                  disabled: false,
+                  openPicker: editor.openPicker
+                })}
+                ${transferStrategyMultiSelect({
+                  kind: "feature",
+                  label: "功能",
+                  options: featureOptions,
+                  selectedIds: strategy.featureIds,
+                  emptyText: selectedPlatforms.size ? "请选择功能" : "请先选择平台",
+                  disabled: !selectedPlatforms.size,
+                  openPicker: editor.openPicker
+                })}
+              </div>
+            </section>
+            <section class="transfer-strategy-form-section" aria-labelledby="strategy-type-title">
+              <header><strong id="strategy-type-title">策略类型</strong><small>类型决定命中数据后的处理方式与优先级。</small></header>
+              <div class="transfer-strategy-type-options">
+                <label class="${strategy.type === TRANSFER_STRATEGY_TYPES.NO_CHANNEL ? "is-selected" : ""}">
+                  <input type="radio" name="transfer-strategy-type" value="${TRANSFER_STRATEGY_TYPES.NO_CHANNEL}" data-transfer-strategy-field="type" ${strategy.type === TRANSFER_STRATEGY_TYPES.NO_CHANNEL ? "checked" : ""}>
+                  <span><strong>无通道</strong><small>命中后不传输，优先级最高</small></span>
+                </label>
+                <label class="${isChannelStrategy ? "is-selected" : ""}">
+                  <input type="radio" name="transfer-strategy-type" value="${TRANSFER_STRATEGY_TYPES.CHANNEL}" data-transfer-strategy-field="type" ${isChannelStrategy ? "checked" : ""}>
+                  <span><strong>通道</strong><small>发送到指定通道，优先级第二</small></span>
+                </label>
+              </div>
+            </section>
+            ${isChannelStrategy ? `<section class="transfer-strategy-form-section" aria-labelledby="strategy-channel-title">
+              <header><strong id="strategy-channel-title">通道选择</strong><small>支持多选；停用通道仍可配置，但执行前需要先启用。</small></header>
+              ${transferStrategyMultiSelect({
+                kind: "channel",
+                label: "指定通道",
+                options: channelOptions,
+                selectedIds: strategy.channelIds,
+                emptyText: channelOptions.length ? "请选择通道" : "请先新增通道",
+                disabled: !channelOptions.length,
+                openPicker: editor.openPicker
+              })}
+            </section>` : ""}
+          </div>
+        </div>
+        <footer>
+          <span>类型层级：<strong>${escapeHtml(getTransferStrategyPriorityLabel(strategy))}</strong> · 同级优先级：<strong>${escapeHtml(normalizeTransferStrategyPriority(strategy.priority))}</strong></span>
+          <button type="button" class="transfer-primary-button" data-transfer-action="save-strategy">保存策略</button>
+        </footer>
+      </section>
+    </div>
+  `;
+}
+
+function transferStrategiesTemplate(settings) {
+  const strategies = [...(settings.strategies?.length ? settings.strategies : getDefaultTransferSettings().strategies)]
+    .sort(compareTransferStrategies);
+  const dataOptions = getTransferStrategyDataOptions();
+  const rows = strategies.map((strategy) => {
+    const builtIn = isBuiltInTransferStrategy(strategy);
+    const priority = getTransferStrategyPriority(strategy);
+    return `
+      <tr class="${builtIn ? "is-built-in" : ""}">
+        <td class="transfer-strategy-name"><span><strong>${escapeHtml(strategy.name)}</strong>${builtIn ? '<b class="transfer-strategy-built-in">系统内置</b>' : ""}</span><small>${escapeHtml(strategy.id)}</small></td>
+        <td class="transfer-strategy-data">${transferStrategyDataSummary(strategy, dataOptions)}</td>
+        <td><span class="transfer-strategy-type ${strategy.type === TRANSFER_STRATEGY_TYPES.NO_CHANNEL ? "no-channel" : "channel"}">${escapeHtml(getTransferStrategyTypeLabel(strategy))}</span></td>
+        <td class="transfer-strategy-channel">${transferStrategyChannelSummary(strategy, settings.channels)}</td>
+        <td><span class="transfer-strategy-priority priority-${priority}">${escapeHtml(getTransferStrategyPriorityLabel(strategy))}</span></td>
+        <td class="transfer-strategy-manual-priority"><strong>${escapeHtml(normalizeTransferStrategyPriority(strategy.priority))}</strong><small>${builtIn ? "系统固定" : "数值越大越优先"}</small></td>
+        <td><span class="transfer-channel-state ${strategy.enabled ? "enabled" : "disabled"}">${strategy.enabled ? "已开启" : "已关闭"}</span></td>
+        <td class="transfer-channel-actions">${builtIn
+          ? '<span class="transfer-strategy-locked">不可编辑 · 不可删除</span>'
+          : `<button type="button" data-transfer-action="edit-strategy" data-transfer-strategy-id="${escapeHtml(strategy.id)}">编辑</button><button type="button" data-transfer-action="toggle-strategy" data-transfer-strategy-id="${escapeHtml(strategy.id)}">${strategy.enabled ? "停用" : "启用"}</button><button type="button" class="danger" data-transfer-action="remove-strategy" data-transfer-strategy-id="${escapeHtml(strategy.id)}">删除</button>`}</td>
+      </tr>
+    `;
+  }).join("");
+  return `
+    <section class="transfer-config-page transfer-strategy-page" aria-label="传输策略">
+      ${state.transferStrategyEditor ? "" : transferSettingsNotice()}
+      <header class="transfer-config-header transfer-channel-page-header">
+        <div>
+          <span>TRANSFER STRATEGIES</span>
+          <h2>策略列表</h2>
+          <p>先按无通道、指定通道、默认通道的类型层级匹配；同类型内再按数值优先级从大到小命中。</p>
+        </div>
+        <button type="button" class="transfer-primary-button" data-transfer-action="new-strategy">新增策略</button>
+      </header>
+      <div class="transfer-strategy-priority-guide" aria-label="策略优先级说明">
+        <span>类型层级</span>
+        <div><strong>1</strong><b>无通道</b><small>最高 · 命中后不传输</small></div>
+        <i aria-hidden="true">→</i>
+        <div><strong>2</strong><b>指定通道</b><small>第二 · 发送到所选通道</small></div>
+        <i aria-hidden="true">→</i>
+        <div><strong>3</strong><b>默认通道</b><small>最低 · 系统兜底策略</small></div>
+      </div>
+      ${state.transferStrategyEditor ? transferStrategyEditorTemplate(state.transferStrategyEditor, settings) : ""}
+      <div class="transfer-table-shell" tabindex="0">
+        <table class="transfer-table transfer-strategy-table">
+          <thead><tr><th>策略名称</th><th>选择数据</th><th>策略类型</th><th>通道绑定</th><th>类型层级</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </section>
+  `;
 }
 
 function transferWorkspaceTemplate() {
@@ -848,40 +1556,48 @@ function transferWorkspaceTemplate() {
   }
 
   const workspace = state.transferWorkspace || { isPreview: false, dataRows: [], taskRows: [] };
-  const dataRows = Array.isArray(workspace.dataRows) ? workspace.dataRows : [];
-  const taskRows = Array.isArray(workspace.taskRows) ? workspace.taskRows : [];
+  const settings = state.transferSettings || getDefaultTransferSettings();
+  const dataRows = applyTransferStrategiesToRows(workspace.dataRows, settings, {
+    preferPersisted: !workspace.isPreview,
+    preview: workspace.isPreview
+  });
   const filteredDataRows = filterTransferDataRows(dataRows, state.transferDataFilters);
-  const filteredTaskRows = filterTransferTaskRows(taskRows, state.transferTaskFilters);
   const dataPage = paginateTransferRows(filteredDataRows, state.transferDataPage, 20);
-  const taskPage = paginateTransferRows(filteredTaskRows, state.transferTaskPage, 20);
   state.transferDataPage = dataPage.currentPage;
-  state.transferTaskPage = taskPage.currentPage;
-  const isData = state.transferTab === "data";
+  const activeTab = ["data", "settings", "channels", "strategies"].includes(state.transferTab) ? state.transferTab : "data";
   const notice = state.transferNotice
     ? `<div class="transfer-notice ${escapeHtml(state.transferNotice.tone)}" role="status">${escapeHtml(state.transferNotice.text)}</div>`
-    : `<div class="transfer-notice ${workspace.isPreview ? "info" : "neutral"}" role="status">${workspace.isPreview ? "网页预览展示示例数据；在扩展中会聚合所有功能的本地存储。" : "已读取各功能的本地存储。远程归档尚未接入，当前不会上传数据。"}</div>`;
-  const activeRows = isData ? dataRows : taskRows;
-  const activePage = isData ? dataPage : taskPage;
+    : `<div class="transfer-notice ${workspace.isPreview ? "info" : "neutral"}" role="status">${workspace.isPreview ? "网页预览展示示例数据，并按当前策略实时演示传输动作。" : "已读取后台持久化的传输状态与动作快照；刷新会读取最新执行结果，并为尚无快照的历史数据建立无需传输基线。"}</div>`;
+  const content = activeTab === "data" ? `
+    ${transferDataStatusTabs(dataRows)}
+    <section class="transfer-content" role="tabpanel">
+      <header class="transfer-content-header">
+        <div>
+          <h2>所有本地数据</h2>
+          <p>按平台、功能、数据类型和采集时间筛选；传输状态通过上方页签切换。</p>
+        </div>
+        <span class="transfer-readonly-note">${settings.enabled ? "策略路由已开启" : "总开关关闭 · 全部无需传输"}</span>
+      </header>
+      ${transferDataFilterFields(dataRows)}
+      ${transferSummaryLabel(filteredDataRows)}
+      ${transferDataTable(dataPage.items, dataPage)}
+    </section>
+  ` : activeTab === "settings"
+    ? transferSettingsTemplate(settings)
+    : activeTab === "channels"
+      ? transferChannelsTemplate(settings)
+      : transferStrategiesTemplate(settings);
 
   return `
     <section class="transfer-workspace" aria-label="数据传输工作台">
       ${notice}
       <div class="transfer-tabs" role="tablist" aria-label="数据传输内容">
-        <button type="button" role="tab" aria-selected="${isData}" class="${isData ? "active" : ""}" data-transfer-tab="data">数据 <span>${dataRows.length}</span></button>
-        <button type="button" role="tab" aria-selected="${!isData}" class="${!isData ? "active" : ""}" data-transfer-tab="task">任务 <span>${taskRows.length}</span></button>
+        <button type="button" role="tab" aria-selected="${activeTab === "data"}" class="${activeTab === "data" ? "active" : ""}" data-transfer-tab="data">数据 <span>${dataRows.length}</span></button>
+        <button type="button" role="tab" aria-selected="${activeTab === "settings"}" class="${activeTab === "settings" ? "active" : ""}" data-transfer-tab="settings">设置</button>
+        <button type="button" role="tab" aria-selected="${activeTab === "channels"}" class="${activeTab === "channels" ? "active" : ""}" data-transfer-tab="channels">通道 <span>${settings.channels.length}</span></button>
+        <button type="button" role="tab" aria-selected="${activeTab === "strategies"}" class="${activeTab === "strategies" ? "active" : ""}" data-transfer-tab="strategies">策略 <span>${settings.strategies?.length || getDefaultTransferSettings().strategies.length}</span></button>
       </div>
-      <section class="transfer-content" role="tabpanel">
-        <header class="transfer-content-header">
-          <div>
-            <h2>${isData ? "所有本地数据" : "传输任务"}</h2>
-            <p>${isData ? "按平台、功能、采集时间和传输状态筛选所有本地采集结果。" : "查看归档任务的触发来源、状态、数据范围与失败信息。"}</p>
-          </div>
-          <button class="transfer-primary-disabled" type="button" disabled>远程同步尚未接入</button>
-        </header>
-        ${transferFilterFields(isData ? "data" : "task", activeRows)}
-        ${transferSummaryLabel(isData ? filteredDataRows : filteredTaskRows, isData ? "data" : "task")}
-        ${isData ? transferDataTable(dataPage.items, dataPage) : transferTaskTable(taskPage.items, taskPage)}
-      </section>
+      ${content}
     </section>
   `;
 }
@@ -889,14 +1605,33 @@ function transferWorkspaceTemplate() {
 function renderTransfer() {
   const root = document.getElementById("transferRoot");
   if (root) root.innerHTML = transferWorkspaceTemplate();
+  document.body.classList.toggle("has-transfer-channel-modal", Boolean(state.transferChannelEditor));
+  document.body.classList.toggle("has-transfer-strategy-modal", Boolean(state.transferStrategyEditor));
 }
 
-async function refreshTransferWorkspace() {
+async function refreshTransferWorkspace({ reconcile = true } = {}) {
   state.transferLoading = true;
   state.transferNotice = null;
   if (state.activePage === "transfer") renderTransfer();
+  let reconcileError = null;
   try {
-    state.transferWorkspace = await loadTransferWorkspace(getTransferFeatureDescriptors());
+    if (reconcile) {
+      try {
+        await requestTransferDataReconcile();
+      } catch (error) {
+        reconcileError = error;
+      }
+    }
+    const [workspace, transferSettings] = await Promise.all([
+      loadTransferWorkspace(getTransferFeatureDescriptors()),
+      loadTransferSettings()
+    ]);
+    state.transferWorkspace = workspace;
+    state.transferSettings = transferSettings;
+    lastPersistedTransferSettings = transferSettings;
+    if (reconcileError) {
+      state.transferNotice = { tone: "error", text: `已读取本地传输快照，但后台策略同步失败：${reconcileError.message || String(reconcileError)}` };
+    }
   } catch (error) {
     state.transferWorkspace = { isPreview: false, dataRows: [], taskRows: [], loadedAt: "" };
     state.transferNotice = { tone: "error", text: `读取本地数据失败：${error.message || String(error)}` };
@@ -904,6 +1639,306 @@ async function refreshTransferWorkspace() {
     state.transferLoading = false;
     if (state.activePage === "transfer") renderTransfer();
   }
+}
+
+function cloneTransferChannel(channel) {
+  return {
+    ...channel,
+    config: { ...(channel?.config || {}) }
+  };
+}
+
+function focusTransferChannelEditor(selector = "[data-transfer-channel-field='name']") {
+  const focus = () => document.querySelector(selector)?.focus();
+  focus();
+  globalThis.requestAnimationFrame?.(focus);
+}
+
+function focusTransferChannelTrigger(editor) {
+  const focus = () => {
+    const selector = editor?.mode === "edit" ? "[data-transfer-action='edit-channel']" : "[data-transfer-action='new-channel']";
+    const trigger = [...document.querySelectorAll(selector)].find((button) => (
+      editor?.mode !== "edit" || button.dataset.transferChannelId === editor.channel?.id
+    ));
+    trigger?.focus();
+  };
+  focus();
+  globalThis.requestAnimationFrame?.(focus);
+}
+
+function openTransferChannelEditor(editor) {
+  state.transferChannelEditor = editor;
+  state.transferSettingsNotice = null;
+  renderTransfer();
+  focusTransferChannelEditor();
+}
+
+function closeTransferChannelEditor() {
+  const editor = state.transferChannelEditor;
+  state.transferChannelEditor = null;
+  state.transferSettingsNotice = null;
+  renderTransfer();
+  focusTransferChannelTrigger(editor);
+}
+
+async function persistTransferSettings(nextSettings, noticeText = "传输配置已保存。") {
+  if (!lastPersistedTransferSettings) {
+    lastPersistedTransferSettings = normalizeTransferSettings(state.transferSettings || getDefaultTransferSettings());
+  }
+  const optimisticSettings = normalizeTransferSettings(nextSettings);
+  const revision = ++transferSettingsSaveRevision;
+  state.transferSettings = optimisticSettings;
+  state.transferSettingsNotice = null;
+  renderTransfer();
+
+  const saveRequest = transferSettingsSaveQueue.then(() => saveTransferSettings(optimisticSettings));
+  transferSettingsSaveQueue = saveRequest.catch(() => undefined);
+  try {
+    const savedSettings = await saveRequest;
+    lastPersistedTransferSettings = savedSettings;
+    const isLatestSave = revision === transferSettingsSaveRevision;
+    if (isLatestSave) {
+      state.transferSettings = savedSettings;
+      state.transferSettingsNotice = { tone: "success", text: noticeText };
+      renderTransfer();
+      await refreshTransferWorkspace();
+    }
+    return isLatestSave;
+  } catch (error) {
+    if (revision === transferSettingsSaveRevision) {
+      state.transferSettings = lastPersistedTransferSettings || getDefaultTransferSettings();
+      state.transferSettingsNotice = { tone: "error", text: `传输配置保存失败：${error.message || String(error)}` };
+      renderTransfer();
+    }
+    return false;
+  }
+}
+
+async function saveTransferChannelEditor() {
+  const editor = state.transferChannelEditor;
+  if (!editor?.channel) return;
+  const channel = cloneTransferChannel(editor.channel);
+  const isMongo = channel.type === TRANSFER_CHANNEL_TYPES.MONGODB;
+  if (!String(channel.name || "").trim()) {
+    state.transferSettingsNotice = { tone: "error", text: "请填写通道名称。" };
+    renderTransfer();
+    focusTransferChannelEditor();
+    return;
+  }
+  if (!isMongo && !String(channel.config?.endpoint || "").trim()) {
+    state.transferSettingsNotice = { tone: "error", text: "请填写 API 的 POST 请求地址。" };
+    renderTransfer();
+    focusTransferChannelEditor("[data-transfer-channel-field='config.endpoint']");
+    return;
+  }
+  if (isMongo && (!String(channel.config?.connectionString || "").trim() || !String(channel.config?.database || "").trim() || !String(channel.config?.collection || "").trim())) {
+    state.transferSettingsNotice = { tone: "error", text: "请完整填写 MongoDB 连接串、数据库和集合。" };
+    renderTransfer();
+    focusTransferChannelEditor("[data-transfer-channel-field='config.connectionString']");
+    return;
+  }
+  if (!isMongo) {
+    try {
+      getTransferApiOriginPattern(channel.config?.endpoint);
+      validateTransferApiHeaders(channel.config?.headers);
+      const granted = await requestTransferApiOriginPermission(channel.config?.endpoint);
+      if (!granted) throw new Error("未授予该 API 地址的访问权限，通道未保存。");
+    } catch (error) {
+      state.transferSettingsNotice = { tone: "error", text: error.message || String(error) };
+      renderTransfer();
+      focusTransferChannelEditor("[data-transfer-channel-field='config.endpoint']");
+      return;
+    }
+  }
+
+  const current = state.transferSettings || getDefaultTransferSettings();
+  const now = new Date().toISOString();
+  channel.updatedAt = now;
+  if (!channel.createdAt) channel.createdAt = now;
+  const existingIndex = current.channels.findIndex((item) => item.id === channel.id);
+  const channels = [...current.channels];
+  if (existingIndex >= 0) channels.splice(existingIndex, 1, channel);
+  else channels.unshift(channel);
+  const completedEditor = state.transferChannelEditor;
+  const saved = await persistTransferSettings(
+    { ...current, channels },
+    existingIndex >= 0 ? "通道配置已更新。" : "通道已添加，当前不会发起网络请求。"
+  );
+  if (!saved) return;
+  state.transferChannelEditor = null;
+  renderTransfer();
+  focusTransferChannelTrigger(completedEditor);
+}
+
+function updateTransferChannelEditor(event) {
+  const field = event.target.dataset.transferChannelField;
+  const editor = state.transferChannelEditor;
+  if (!field || !editor?.channel) return false;
+  const channel = editor.channel;
+  const value = field === "enabled" ? event.target.value === "true" : event.target.value;
+  if (field.startsWith("config.")) {
+    channel.config = { ...(channel.config || {}), [field.slice("config.".length)]: value };
+  } else {
+    channel[field] = value;
+  }
+  return true;
+}
+
+function cloneTransferStrategy(strategy) {
+  return {
+    ...strategy,
+    platformIds: [...(strategy?.platformIds || [])],
+    featureIds: [...(strategy?.featureIds || [])],
+    channelIds: [...(strategy?.channelIds || [])]
+  };
+}
+
+function focusTransferStrategyEditor(selector = "[data-transfer-strategy-field='name']") {
+  const focus = () => document.querySelector(selector)?.focus();
+  focus();
+  globalThis.requestAnimationFrame?.(focus);
+}
+
+function focusTransferStrategyTrigger(editor) {
+  const focus = () => {
+    const selector = editor?.mode === "edit" ? "[data-transfer-action='edit-strategy']" : "[data-transfer-action='new-strategy']";
+    const trigger = [...document.querySelectorAll(selector)].find((button) => (
+      editor?.mode !== "edit" || button.dataset.transferStrategyId === editor.strategy?.id
+    ));
+    trigger?.focus();
+  };
+  focus();
+  globalThis.requestAnimationFrame?.(focus);
+}
+
+function openTransferStrategyEditor(editor) {
+  state.transferStrategyEditor = { ...editor, openPicker: null };
+  state.transferSettingsNotice = null;
+  renderTransfer();
+  focusTransferStrategyEditor();
+}
+
+function closeTransferStrategyEditor() {
+  const editor = state.transferStrategyEditor;
+  state.transferStrategyEditor = null;
+  state.transferSettingsNotice = null;
+  renderTransfer();
+  focusTransferStrategyTrigger(editor);
+}
+
+async function saveTransferStrategyEditor() {
+  const editor = state.transferStrategyEditor;
+  if (!editor?.strategy || isBuiltInTransferStrategy(editor.strategy)) return;
+  const strategy = cloneTransferStrategy(editor.strategy);
+  const current = state.transferSettings || getDefaultTransferSettings();
+  const dataOptions = getTransferStrategyDataOptions();
+  const validPlatformIds = new Set(dataOptions.platforms.map((platform) => platform.id));
+  strategy.platformIds = [...new Set(strategy.platformIds)].filter((platformId) => validPlatformIds.has(platformId));
+  const validFeatureIds = new Set(dataOptions.features
+    .filter((feature) => strategy.platformIds.includes(feature.platformId))
+    .map((feature) => feature.id));
+  strategy.featureIds = [...new Set(strategy.featureIds)].filter((featureId) => validFeatureIds.has(featureId));
+  const validChannelIds = new Set(current.channels.map((channel) => channel.id));
+  strategy.channelIds = [...new Set(strategy.channelIds)].filter((channelId) => validChannelIds.has(channelId));
+
+  if (!String(strategy.name || "").trim()) {
+    state.transferSettingsNotice = { tone: "error", text: "请填写策略名称。" };
+    renderTransfer();
+    focusTransferStrategyEditor();
+    return;
+  }
+  const priority = Number(strategy.priority);
+  if (!Number.isInteger(priority) || priority < 0 || priority > MAX_TRANSFER_STRATEGY_PRIORITY) {
+    state.transferSettingsNotice = { tone: "error", text: `优先级必须是 0–${MAX_TRANSFER_STRATEGY_PRIORITY} 的整数。` };
+    renderTransfer();
+    focusTransferStrategyEditor("[data-transfer-strategy-field='priority']");
+    return;
+  }
+  if (!strategy.platformIds.length) {
+    state.transferSettingsNotice = { tone: "error", text: "请至少选择一个平台。" };
+    state.transferStrategyEditor.openPicker = "platform";
+    renderTransfer();
+    focusTransferStrategyEditor("[data-transfer-strategy-choice='platform']");
+    return;
+  }
+  if (!strategy.featureIds.length) {
+    state.transferSettingsNotice = { tone: "error", text: "请至少选择一个功能。" };
+    state.transferStrategyEditor.openPicker = "feature";
+    renderTransfer();
+    focusTransferStrategyEditor("[data-transfer-strategy-choice='feature']");
+    return;
+  }
+  if (strategy.type === TRANSFER_STRATEGY_TYPES.CHANNEL && !strategy.channelIds.length) {
+    state.transferSettingsNotice = { tone: "error", text: current.channels.length ? "请至少选择一个通道。" : "请先在通道列表中新增通道。" };
+    state.transferStrategyEditor.openPicker = current.channels.length ? "channel" : null;
+    renderTransfer();
+    focusTransferStrategyEditor("[data-transfer-strategy-choice='channel']");
+    return;
+  }
+
+  const now = new Date().toISOString();
+  strategy.name = String(strategy.name).trim();
+  strategy.priority = normalizeTransferStrategyPriority(priority);
+  strategy.updatedAt = now;
+  if (!strategy.createdAt) strategy.createdAt = now;
+  const strategies = [...(current.strategies || [])];
+  const existingIndex = strategies.findIndex((item) => item.id === strategy.id && !isBuiltInTransferStrategy(item));
+  if (existingIndex >= 0) strategies.splice(existingIndex, 1, strategy);
+  else strategies.unshift(strategy);
+  const completedEditor = state.transferStrategyEditor;
+  const saved = await persistTransferSettings(
+    { ...current, strategies },
+    existingIndex >= 0 ? "策略已更新。" : "策略已添加。"
+  );
+  if (!saved) return;
+  state.transferStrategyEditor = null;
+  renderTransfer();
+  focusTransferStrategyTrigger(completedEditor);
+}
+
+function updateTransferStrategyChoice(event) {
+  const kind = event.target.dataset.transferStrategyChoice;
+  const editor = state.transferStrategyEditor;
+  if (!kind || !editor?.strategy) return false;
+  const fieldByKind = { platform: "platformIds", feature: "featureIds", channel: "channelIds" };
+  const field = fieldByKind[kind];
+  if (!field) return false;
+  const values = new Set(editor.strategy[field] || []);
+  if (event.target.checked) values.add(event.target.value);
+  else values.delete(event.target.value);
+  editor.strategy[field] = [...values];
+  if (kind === "platform") {
+    editor.strategy.featureIds = editor.strategy.featureIds.filter((featureId) => (
+      editor.strategy.platformIds.some((platformId) => featureId.startsWith(`${platformId}/`))
+    ));
+  }
+  editor.openPicker = kind;
+  state.transferSettingsNotice = null;
+  renderTransfer();
+  focusTransferStrategyEditor(`[data-transfer-strategy-choice='${kind}'][value='${CSS.escape(event.target.value)}']`);
+  return true;
+}
+
+function updateTransferStrategyField(event) {
+  const field = event.target.dataset.transferStrategyField;
+  const editor = state.transferStrategyEditor;
+  if (!field || !editor?.strategy) return false;
+  if (field === "name" || field === "priority") {
+    if (field === "name") editor.strategy.name = event.target.value;
+    else editor.strategy.priority = event.target.value;
+    return true;
+  }
+  if (event.type !== "change") return true;
+  if (field === "enabled") editor.strategy.enabled = event.target.checked;
+  if (field === "type") editor.strategy.type = event.target.value;
+  editor.openPicker = null;
+  state.transferSettingsNotice = null;
+  const focusSelector = field === "type"
+    ? `[data-transfer-strategy-field='type'][value='${CSS.escape(event.target.value)}']`
+    : "[data-transfer-strategy-field='enabled']";
+  renderTransfer();
+  focusTransferStrategyEditor(focusSelector);
+  return true;
 }
 
 function updateSettingsDirtyState() {
@@ -1062,6 +2097,39 @@ function loadFeatureStyle(feature) {
   document.head.append(link);
 }
 
+function updateFeatureRefreshButton() {
+  const button = document.getElementById("refreshActiveFeature");
+  if (!button) return;
+  const visible = state.activePage === "feature" && Boolean(state.activeFeature);
+  button.hidden = !visible;
+  button.disabled = !visible || state.featureRefreshing;
+  button.classList.toggle("is-refreshing", state.featureRefreshing);
+  button.title = state.featureRefreshing ? "正在刷新功能页面" : "强制刷新功能页面";
+}
+
+async function refreshActiveFeature() {
+  if (state.featureRefreshing || !state.activeGroup || !state.activeFeature) return;
+  const groupId = state.activeGroup.id;
+  const featureId = state.activeFeature.id;
+  state.featureRefreshing = true;
+  updateFeatureRefreshButton();
+  try {
+    if (typeof state.unmountFeature === "function") {
+      try {
+        await state.unmountFeature();
+      } catch (error) {
+        // 清理失败不应阻断用户主动刷新；新挂载会重新建立事件订阅与页面状态。
+        console.warn("清理旧功能页面失败，将继续刷新：", error);
+      }
+    }
+    state.unmountFeature = null;
+    await openFeature(groupId, featureId);
+  } finally {
+    state.featureRefreshing = false;
+    updateFeatureRefreshButton();
+  }
+}
+
 async function openFeature(groupId, featureId) {
   const { group, feature } = findFeature(groupId, featureId);
   if (!group || !feature) {
@@ -1081,6 +2149,7 @@ async function openFeature(groupId, featureId) {
     document.getElementById("featureView").hidden = false;
     setActiveAppPage("feature");
     document.title = `${feature.name} · ${getAppName()}`;
+    updateFeatureRefreshButton();
     return;
   }
 
@@ -1101,6 +2170,7 @@ async function openFeature(groupId, featureId) {
   document.getElementById("transferView").hidden = true;
   featureView.hidden = false;
   setActiveAppPage("feature");
+  updateFeatureRefreshButton();
   featureRoot.innerHTML = '<div class="loading-state">正在加载功能模块…</div>';
   loadFeatureStyle(feature);
 
@@ -1150,6 +2220,20 @@ async function showCatalog() {
 
 async function showMainPage(nextPage) {
   state.activePage = ["catalog", "transfer", "settings"].includes(nextPage) ? nextPage : "catalog";
+  if (state.activePage !== "settings" && state.runnerEditor) {
+    state.runnerEditor = null;
+    document.body.classList.remove("has-settings-runner-modal");
+  }
+  if (state.activePage !== "transfer" && state.transferChannelEditor) {
+    state.transferChannelEditor = null;
+    state.transferSettingsNotice = null;
+    document.body.classList.remove("has-transfer-channel-modal");
+  }
+  if (state.activePage !== "transfer" && state.transferStrategyEditor) {
+    state.transferStrategyEditor = null;
+    state.transferSettingsNotice = null;
+    document.body.classList.remove("has-transfer-strategy-modal");
+  }
   document.getElementById("featureView").hidden = true;
   document.getElementById("catalogView").hidden = state.activePage !== "catalog";
   document.getElementById("settingsView").hidden = state.activePage !== "settings";
@@ -1161,6 +2245,7 @@ async function showMainPage(nextPage) {
     await refreshTransferWorkspace();
   }
   applyBrandSettings();
+  updateFeatureRefreshButton();
 }
 
 function bindEvents() {
@@ -1171,6 +2256,12 @@ function bindEvents() {
   document.querySelectorAll("[data-app-page]").forEach((button) => {
     button.addEventListener("click", () => {
       showMainPage(button.dataset.appPage).catch(console.error);
+    });
+  });
+
+  document.getElementById("refreshActiveFeature").addEventListener("click", () => {
+    refreshActiveFeature().catch((error) => {
+      console.error("刷新功能页面失败：", error);
     });
   });
 
@@ -1189,6 +2280,13 @@ function bindEvents() {
 
   const settingsRoot = document.getElementById("settingsRoot");
   settingsRoot.addEventListener("click", (event) => {
+    if (event.target.matches("[data-runner-editor-modal]")) {
+      state.runnerEditor = null;
+      state.settingsNotice = null;
+      renderSettings();
+      return;
+    }
+
     const tab = event.target.closest("[data-settings-tab]");
     if (tab) {
       state.settingsTab = tab.dataset.settingsTab;
@@ -1209,56 +2307,77 @@ function bindEvents() {
     }
     if (action === "reset-all") {
       state.settingsDraft = getDefaultGlobalSettings();
-      state.runnerConfigTargetFeatureId = "xiaohongshu/post-detail";
+      state.runnerEditor = null;
       state.settingsNotice = { tone: "info", text: "已载入全部默认值，保存后应用。" };
       updateSettingsDirtyState();
       renderSettings();
       return;
     }
-    if (action === "select-runner-source") {
-      state.runnerSourceFeatureId = button.dataset.sourceFeatureId || "";
-      state.runnerConfigTargetFeatureId = "";
+    if (action === "new-runner-binding") {
+      state.runnerEditor = createRunnerEditor();
       state.settingsNotice = null;
       renderSettings();
       return;
     }
-    if (action === "select-runner-config-target") {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      const targetFeatureId = button.dataset.targetFeatureId || "";
-      const wasEnabled = getRunnerTargetIds(sourceFeatureId).includes(targetFeatureId);
-      if (!wasEnabled) setRunnerTargetEnabled(sourceFeatureId, targetFeatureId, true);
-      state.runnerConfigTargetFeatureId = targetFeatureId;
+    if (action === "cancel-runner-editor") {
+      state.runnerEditor = null;
       state.settingsNotice = null;
-      if (!wasEnabled) updateSettingsDirtyState();
       renderSettings();
       return;
     }
-    if (action === "select-all-runner-output-fields") {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      const targetFeatureId = getRunnerConfigTargetFeatureId();
-      const configuration = getDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId);
-      configuration.outputFields = getRunnerCapabilitySchema(targetFeatureId).outputFields.map((item) => item.key);
-      setDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId, configuration);
+    if (action === "runner-editor-next") {
+      const editor = state.runnerEditor;
+      if (!editor?.sourceFeatureId) {
+        state.settingsNotice = { tone: "error", text: "请先选择来源功能。" };
+      } else if (!editor.sourceOutputFields.length) {
+        state.settingsNotice = { tone: "error", text: "请至少选择一个来源输出字段。" };
+      } else {
+        editor.step = 2;
+        state.settingsNotice = null;
+      }
+      renderSettings();
+      return;
+    }
+    if (action === "runner-editor-back") {
+      if (state.runnerEditor) state.runnerEditor.step = 1;
       state.settingsNotice = null;
-      updateSettingsDirtyState();
       renderSettings();
       return;
     }
-    if (action === "reset-runner-binding-configuration") {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      const targetFeatureId = getRunnerConfigTargetFeatureId();
-      setDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId, {});
-      state.settingsNotice = { tone: "info", text: "已恢复当前能力的默认字段与调用参数，保存后生效。" };
-      updateSettingsDirtyState();
+    if (action === "save-runner-binding") {
+      try {
+        saveDraftRunnerBinding(state.runnerEditor);
+        state.runnerEditor = null;
+        state.settingsNotice = { tone: "success", text: "运行器已加入列表，点击“保存设置”后全局生效。" };
+        updateSettingsDirtyState();
+      } catch (error) {
+        state.settingsNotice = { tone: "error", text: error.message || String(error) };
+      }
       renderSettings();
       return;
     }
-    if (action === "clear-runner-targets") {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      delete state.settingsDraft.runners.callableByFeature[sourceFeatureId];
-      delete state.settingsDraft.runners.configurationByBinding?.[sourceFeatureId];
-      state.runnerConfigTargetFeatureId = "";
-      state.settingsNotice = { tone: "info", text: "已清空当前来源功能的可调用 Runner 配置，保存后生效。" };
+    if (action === "edit-runner-binding") {
+      const source = getRunnerFeature(button.dataset.runnerSourceId);
+      const target = getRunnerFeature(button.dataset.runnerTargetId);
+      if (!source || !target) return;
+      state.runnerEditor = createRunnerEditor({
+        source,
+        target,
+        configuration: getDraftRunnerBindingConfiguration(source.id, target.id)
+      });
+      state.settingsNotice = null;
+      renderSettings();
+      return;
+    }
+    if (action === "remove-runner-binding") {
+      const sourceId = button.dataset.runnerSourceId || "";
+      const targetId = button.dataset.runnerTargetId || "";
+      const source = getRunnerFeature(sourceId);
+      const target = getRunnerFeature(targetId);
+      if (!source || !target) return;
+      if (typeof globalThis.confirm === "function" && !globalThis.confirm(`确认删除运行器“${source.name} → ${target.name}”？`)) return;
+      removeDraftRunnerBinding(sourceId, targetId);
+      state.settingsNotice = { tone: "info", text: "运行器已从列表移除，点击“保存设置”后全局生效。" };
       updateSettingsDirtyState();
       renderSettings();
       return;
@@ -1281,16 +2400,6 @@ function bindEvents() {
   });
 
   settingsRoot.addEventListener("input", (event) => {
-    if (event.target.matches('[data-runner-parameter]:not([type="checkbox"])')) {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      const targetFeatureId = getRunnerConfigTargetFeatureId();
-      const configuration = getDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId);
-      configuration.parameters[event.target.dataset.runnerParameter] = event.target.value;
-      setDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId, configuration);
-      state.settingsNotice = null;
-      updateSettingsDirtyState();
-      return;
-    }
     const field = event.target.dataset.settingField;
     if (field === "appName") state.settingsDraft.interface.appName = event.target.value;
     if (field === "taskTimeoutSeconds") state.settingsDraft.limits.taskTimeoutSeconds = event.target.value;
@@ -1303,43 +2412,39 @@ function bindEvents() {
   });
 
   settingsRoot.addEventListener("change", (event) => {
-    if (event.target.matches("[data-runner-target]")) {
-      setRunnerTargetEnabled(getRunnerSourceFeatureId(), event.target.value, event.target.checked);
-      state.settingsNotice = null;
-      updateSettingsDirtyState();
-      renderSettings();
-      return;
-    }
-    if (event.target.matches("[data-runner-output-field]")) {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      const targetFeatureId = getRunnerConfigTargetFeatureId();
-      const configuration = getDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId);
-      const outputFields = new Set(configuration.outputFields);
-      if (event.target.checked) outputFields.add(event.target.value);
-      else outputFields.delete(event.target.value);
-      if (!outputFields.size) {
-        state.settingsNotice = { tone: "error", text: "输出字段至少保留一项。" };
-        renderSettings();
-        return;
+    if (event.target.matches("[data-runner-editor-field]")) {
+      const editor = state.runnerEditor;
+      if (!editor) return;
+      const field = event.target.dataset.runnerEditorField;
+      const value = event.target.value;
+      if (field === "sourceGroupId") {
+        editor.sourceGroupId = value;
+        editor.sourceFeatureId = "";
+        editor.sourceOutputFields = [];
+      } else if (field === "sourceFeatureId") {
+        editor.sourceFeatureId = value;
+        editor.sourceOutputFields = [];
+      } else if (field === "targetGroupId") {
+        editor.targetGroupId = value;
+        editor.targetFeatureId = "";
+        editor.targetInputFields = [];
+      } else if (field === "targetFeatureId") {
+        editor.targetFeatureId = value;
+        editor.targetInputFields = getRunnerInputFields(value).map((item) => item.key);
       }
-      configuration.outputFields = [...outputFields];
-      setDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId, configuration);
       state.settingsNotice = null;
-      updateSettingsDirtyState();
       renderSettings();
       return;
     }
-    if (event.target.matches("[data-runner-parameter]")) {
-      const sourceFeatureId = getRunnerSourceFeatureId();
-      const targetFeatureId = getRunnerConfigTargetFeatureId();
-      const configuration = getDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId);
-      const parameter = event.target.dataset.runnerParameter;
-      configuration.parameters[parameter] = event.target.type === "checkbox"
-        ? event.target.checked
-        : event.target.value;
-      setDraftRunnerBindingConfiguration(sourceFeatureId, targetFeatureId, configuration);
+    if (event.target.matches("[data-runner-editor-output], [data-runner-editor-input]")) {
+      const editor = state.runnerEditor;
+      if (!editor) return;
+      const fieldName = event.target.matches("[data-runner-editor-output]") ? "sourceOutputFields" : "targetInputFields";
+      const fields = new Set(editor[fieldName] || []);
+      if (event.target.checked) fields.add(event.target.value);
+      else fields.delete(event.target.value);
+      editor[fieldName] = [...fields];
       state.settingsNotice = null;
-      updateSettingsDirtyState();
       renderSettings();
       return;
     }
@@ -1363,20 +2468,66 @@ function bindEvents() {
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !state.runnerEditor) return;
+    event.preventDefault();
+    state.runnerEditor = null;
+    state.settingsNotice = null;
+    renderSettings();
+  });
+
   const transferRoot = document.getElementById("transferRoot");
   transferRoot.addEventListener("click", (event) => {
+    if (event.target.matches("[data-transfer-channel-modal]")) {
+      closeTransferChannelEditor();
+      return;
+    }
+    if (event.target.matches("[data-transfer-strategy-modal]")) {
+      closeTransferStrategyEditor();
+      return;
+    }
+
     const tab = event.target.closest("[data-transfer-tab]");
     if (tab) {
-      state.transferTab = tab.dataset.transferTab === "task" ? "task" : "data";
+      const nextTab = tab.dataset.transferTab;
+      state.transferTab = ["data", "settings", "channels", "strategies"].includes(nextTab) ? nextTab : "data";
       renderTransfer();
+      return;
+    }
+
+    const statusTab = event.target.closest("[data-transfer-data-status]");
+    if (statusTab) {
+      state.transferDataFilters.transferStatus = statusTab.dataset.transferDataStatus || "__all__";
+      state.transferDataPage = 1;
+      renderTransfer();
+      return;
+    }
+
+    const channelType = event.target.closest("[data-transfer-channel-type]");
+    if (channelType && !channelType.disabled && state.transferChannelEditor) {
+      const current = state.transferChannelEditor.channel;
+      const next = createTransferChannelDraft(channelType.dataset.transferChannelType);
+      next.id = current.id;
+      next.name = current.name;
+      next.enabled = current.enabled;
+      next.isDefault = current.isDefault === true;
+      next.createdAt = current.createdAt;
+      state.transferChannelEditor = { ...state.transferChannelEditor, channel: next };
+      renderTransfer();
+      focusTransferChannelEditor(`[data-transfer-channel-type='${next.type}']`);
       return;
     }
 
     const button = event.target.closest("[data-transfer-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.transferAction;
+    if (action === "open-transfer-failure") {
+      const row = getResolvedTransferDataRows().find((item) => item.id === button.dataset.transferRowId);
+      if (row?.transferStatus === TRANSFER_STATUS.FAILED) openTransferFailureDetail(row);
+      return;
+    }
     if (action === "open-data-detail") {
-      const row = state.transferWorkspace?.dataRows?.find((item) => item.id === button.dataset.transferRowId);
+      const row = getResolvedTransferDataRows().find((item) => item.id === button.dataset.transferRowId);
       if (row) openTransferDataDetail(row);
       return;
     }
@@ -1389,47 +2540,171 @@ function bindEvents() {
       renderTransfer();
       return;
     }
-    if (action === "toggle-task-filters") {
-      state.transferTaskFiltersOpen = !state.transferTaskFiltersOpen;
-      renderTransfer();
+    if (action === "new-strategy") {
+      openTransferStrategyEditor({ mode: "new", strategy: createTransferStrategyDraft() });
+      return;
+    }
+    if (action === "cancel-strategy-editor") {
+      closeTransferStrategyEditor();
+      return;
+    }
+    if (action === "edit-strategy") {
+      const strategy = state.transferSettings?.strategies?.find((item) => item.id === button.dataset.transferStrategyId);
+      if (!strategy || isBuiltInTransferStrategy(strategy)) return;
+      openTransferStrategyEditor({ mode: "edit", strategy: cloneTransferStrategy(strategy) });
+      return;
+    }
+    if (action === "save-strategy") {
+      saveTransferStrategyEditor().catch(console.error);
+      return;
+    }
+    if (action === "toggle-strategy") {
+      const current = state.transferSettings || getDefaultTransferSettings();
+      const strategyId = button.dataset.transferStrategyId;
+      const selected = current.strategies.find((strategy) => strategy.id === strategyId);
+      if (!selected || isBuiltInTransferStrategy(selected)) return;
+      if (
+        !selected.enabled
+        && selected.type === TRANSFER_STRATEGY_TYPES.CHANNEL
+        && !resolveTransferStrategyChannelIds(selected, current.channels).length
+      ) {
+        state.transferSettingsNotice = { tone: "error", text: "请先编辑策略并至少选择一个有效通道。" };
+        renderTransfer();
+        return;
+      }
+      const strategies = current.strategies.map((strategy) => strategy.id === strategyId
+        ? { ...strategy, enabled: !strategy.enabled, updatedAt: new Date().toISOString() }
+        : strategy);
+      persistTransferSettings({ ...current, strategies }, `“${selected.name}”已${selected.enabled ? "停用" : "启用"}。`).catch(console.error);
+      return;
+    }
+    if (action === "remove-strategy") {
+      const current = state.transferSettings || getDefaultTransferSettings();
+      const strategy = current.strategies.find((item) => item.id === button.dataset.transferStrategyId);
+      if (!strategy || isBuiltInTransferStrategy(strategy)) return;
+      if (typeof globalThis.confirm === "function" && !globalThis.confirm(`确认删除策略“${strategy.name}”？`)) return;
+      const strategies = current.strategies.filter((item) => item.id !== strategy.id);
+      if (state.transferStrategyEditor?.strategy?.id === strategy.id) state.transferStrategyEditor = null;
+      persistTransferSettings({ ...current, strategies }, "策略已删除。默认策略仍会保留。").catch(console.error);
+      return;
+    }
+    if (action === "new-channel") {
+      openTransferChannelEditor({ mode: "new", channel: createTransferChannelDraft() });
+      return;
+    }
+    if (action === "cancel-channel-editor") {
+      closeTransferChannelEditor();
+      return;
+    }
+    if (action === "edit-channel") {
+      const channel = state.transferSettings?.channels?.find((item) => item.id === button.dataset.transferChannelId);
+      if (!channel) return;
+      openTransferChannelEditor({ mode: "edit", channel: cloneTransferChannel(channel) });
+      return;
+    }
+    if (action === "save-channel") {
+      saveTransferChannelEditor().catch(console.error);
+      return;
+    }
+    if (action === "toggle-channel") {
+      const current = state.transferSettings || getDefaultTransferSettings();
+      const channelId = button.dataset.transferChannelId;
+      const channels = current.channels.map((channel) => channel.id === channelId
+        ? { ...channel, enabled: !channel.enabled, updatedAt: new Date().toISOString() }
+        : channel);
+      persistTransferSettings({ ...current, channels }, "通道状态已更新。").catch(console.error);
+      return;
+    }
+    if (action === "set-default-channel") {
+      const current = state.transferSettings || getDefaultTransferSettings();
+      const channelId = button.dataset.transferChannelId;
+      const selected = current.channels.find((channel) => channel.id === channelId);
+      if (!selected) return;
+      const now = new Date().toISOString();
+      const channels = current.channels.map((channel) => ({
+        ...channel,
+        isDefault: channel.id === channelId,
+        updatedAt: channel.id === channelId ? now : channel.updatedAt
+      }));
+      persistTransferSettings({ ...current, channels }, `“${selected.name}”已设为默认通道。`).catch(console.error);
+      return;
+    }
+    if (action === "remove-channel") {
+      const current = state.transferSettings || getDefaultTransferSettings();
+      const channel = current.channels.find((item) => item.id === button.dataset.transferChannelId);
+      if (!channel) return;
+      if (typeof globalThis.confirm === "function" && !globalThis.confirm(`确认删除通道“${channel.name}”？`)) return;
+      const channels = current.channels.filter((item) => item.id !== channel.id);
+      if (state.transferChannelEditor?.channel?.id === channel.id) state.transferChannelEditor = null;
+      const blockedStrategyCount = (current.strategies || []).filter((strategy) => (
+        !isBuiltInTransferStrategy(strategy)
+        && strategy.type === TRANSFER_STRATEGY_TYPES.CHANNEL
+        && strategy.enabled
+        && strategy.channelIds.includes(channel.id)
+        && !strategy.channelIds.some((channelId) => channelId !== channel.id && channels.some((item) => item.id === channelId))
+      )).length;
+      let message = channel.isDefault && channels.length
+        ? `通道已删除，已将“${channels[0].name}”设为默认通道。`
+        : "通道已删除。";
+      if (blockedStrategyCount) message += ` ${blockedStrategyCount} 条策略失去全部绑定通道，命中时将按无需传输阻断，不会改发默认通道。`;
+      persistTransferSettings({ ...current, channels }, message).catch(console.error);
       return;
     }
     if (action === "clear-data-filters") {
-      state.transferDataFilters = { query: "", platform: "__all__", feature: "__all__", localStatus: "__all__", transferStatus: "__all__", dateStart: "", dateEnd: "" };
+      state.transferDataFilters = { query: "", platform: "__all__", feature: "__all__", entityType: "__all__", contentType: "__all__", localStatus: "__all__", transferStatus: state.transferDataFilters.transferStatus || "__all__", dateStart: "", dateEnd: "" };
       state.transferDataPage = 1;
-      renderTransfer();
-      return;
-    }
-    if (action === "clear-task-filters") {
-      state.transferTaskFilters = { query: "", platform: "__all__", feature: "__all__", trigger: "__all__", status: "__all__", dateStart: "", dateEnd: "" };
-      state.transferTaskPage = 1;
       renderTransfer();
       return;
     }
     if (action === "data-prev" || action === "data-next") {
       state.transferDataPage += action === "data-prev" ? -1 : 1;
       renderTransfer();
-      return;
     }
-    if (action === "task-prev" || action === "task-next") {
-      state.transferTaskPage += action === "task-prev" ? -1 : 1;
-      renderTransfer();
-    }
+  });
+
+  transferRoot.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || (!state.transferChannelEditor && !state.transferStrategyEditor)) return;
+    event.preventDefault();
+    if (state.transferStrategyEditor) closeTransferStrategyEditor();
+    else closeTransferChannelEditor();
   });
 
   function updateTransferFilter(event) {
     const field = event.target.dataset.transferFilter;
     const kind = event.target.dataset.transferKind;
     if (!field || !kind) return;
-    const filters = kind === "task" ? state.transferTaskFilters : state.transferDataFilters;
-    filters[field] = event.target.value;
-    if (kind === "task") state.transferTaskPage = 1;
-    else state.transferDataPage = 1;
+    state.transferDataFilters[field] = event.target.value;
+    state.transferDataPage = 1;
     renderTransfer();
   }
 
-  transferRoot.addEventListener("input", updateTransferFilter);
-  transferRoot.addEventListener("change", updateTransferFilter);
+  transferRoot.addEventListener("input", (event) => {
+    if (!updateTransferStrategyField(event) && !updateTransferChannelEditor(event)) updateTransferFilter(event);
+  });
+  transferRoot.addEventListener("change", (event) => {
+    if (event.target.matches("[data-transfer-setting='enabled']")) {
+      const current = state.transferSettings || getDefaultTransferSettings();
+      persistTransferSettings({ ...current, enabled: event.target.checked }, event.target.checked ? "数据传输开关已开启。" : "数据传输开关已关闭。").catch(console.error);
+      return;
+    }
+    if (event.target.matches("[data-transfer-setting='retryCount'], [data-transfer-setting='batchSize']")) {
+      const field = event.target.dataset.transferSetting;
+      const limits = field === "retryCount"
+        ? { min: MIN_TRANSFER_RETRY_COUNT, max: MAX_TRANSFER_RETRY_COUNT, label: "重试次数" }
+        : { min: MIN_TRANSFER_BATCH_SIZE, max: MAX_TRANSFER_BATCH_SIZE, label: "批量条数" };
+      const value = Number(event.target.value);
+      if (!Number.isInteger(value) || value < limits.min || value > limits.max) {
+        state.transferSettingsNotice = { tone: "error", text: `${limits.label}必须是 ${limits.min}–${limits.max} 之间的整数。` };
+        renderTransfer();
+        return;
+      }
+      const current = state.transferSettings || getDefaultTransferSettings();
+      persistTransferSettings({ ...current, [field]: value }, `${limits.label}已更新为 ${value}。`).catch(console.error);
+      return;
+    }
+    if (updateTransferStrategyChoice(event)) return;
+    if (!updateTransferStrategyField(event) && !updateTransferChannelEditor(event)) updateTransferFilter(event);
+  });
 
   globalThis.addEventListener(FEATURE_RUN_STATUS_EVENT, (event) => {
     const featureKey = event.detail?.featureKey;

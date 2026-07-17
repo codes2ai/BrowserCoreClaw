@@ -181,7 +181,8 @@ export function runXiaohongshuPostDetailPageCommand(command) {
     return {
       detail: getDetail(),
       capturedAt: new Date().toISOString(),
-      pageUrl: location.href
+      pageUrl: location.href,
+      rawPageText: String(document.body?.innerText || "").trim()
     };
   }
   throw new Error(`未知的小红书正文页命令：${command}`);

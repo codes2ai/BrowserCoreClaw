@@ -26,6 +26,8 @@ export const mountDouyinProfileInfoMonitor = createWeiboProfileMonitor({
   guideInputText: "输入一个或多个抖音博主主页链接，格式为 <code>https://www.douyin.com/user/用户ID</code>。",
   guideWaitText: "程序会等待资料区连续稳定后再读取；遇到平台安全验证时会提示你在当前标签页完成。",
   fieldList: "profileId · douyinId · avatar · nickname · following · followers · likes · ipLocation · age · location · bio · profileTags · profileRawText",
+  fieldKeys: ["profileUrl", "profileId", "douyinId", "avatar", "nickname", "following", "followers", "likes", "ipLocation", "age", "location", "bio", "profileTags", "profileRawText", "capturedAt"],
+  entityType: "profile",
   dataSummary: "每个主页只保留最新一条博主资料。",
   emptyDataText: "运行后，抖音博主公开资料会显示在这里",
   dataFilters: [

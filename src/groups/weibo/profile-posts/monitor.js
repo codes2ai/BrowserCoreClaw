@@ -19,6 +19,9 @@ export const mountWeiboProfilePostsMonitor = createWeiboProfileMonitor({
   guideIntro: "确认当前 Chrome Profile 已登录微博后，按公开主页的原始卡片顺序采集博文，不修改页面筛选条件。",
   guideWaitText: "程序先确认页面稳定，再进行短距离分段滚动；每次滚动随机等待 2.2–4.5 秒后才继续读取。",
   fieldList: "postId · author · text · publishedAt · source · reposts · comments · likes · mediaUrls · url",
+  fieldKeys: ["profileUrl", "pageOrder", "postId", "author", "text", "publishedAt", "source", "reposts", "comments", "likes", "mediaUrls", "url", "capturedAt"],
+  entityType: "content",
+  contentType: "post",
   dataSummary: "博文按微博主页卡片原始顺序保存。",
   emptyDataText: "运行后，微博主页博文会显示在这里",
   dataFilters: [

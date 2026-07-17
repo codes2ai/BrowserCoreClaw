@@ -35,12 +35,14 @@ import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task
 import { normalizeXiaohongshuPublishedDate } from "../date-normalizer.js";
 import { normalizeXiaohongshuLikes } from "../likes-normalizer.js";
 import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
+import { createBoundRunnerDataActions } from "../../../shared/bound-runner-data-actions.js";
 import {
   buildAutomaticBoundRunnerRequests,
   getAutoRunnableBoundRunnerTargets,
   normalizeAutoRunBoundRunners,
   normalizeBoundRunnerTargets
 } from "../../../shared/bound-runner-automation.js";
+import { mergeBoundRunnerResultsIntoSourceRows } from "../../../shared/bound-runner-result-merge.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -84,6 +86,8 @@ import {
   updateFeatureRunnerDraft
 } from "../../../shared/feature-runner-panel.js";
 import { renderPageParametersCard } from "../../../shared/page-parameters.js";
+import { withCanonicalRecord } from "../../../shared/canonical-data.js";
+import { renderFieldGuide } from "../../../shared/field-guide.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuKeywordV1";
 const FEATURE_KEY = "xiaohongshu/keyword-search";
@@ -109,6 +113,9 @@ const DATA_COLUMNS = Object.freeze([
   { key: "likes", label: "点赞" },
   { key: "url", label: "链接", type: "link" },
   { key: "collectedAt", label: "采集时间" }
+]);
+const GUIDE_FIELDS = Object.freeze([
+  "keyword", "pageOrder", "cover", "title", "description", "author", "likes", "publishedAt", "publishedAtRaw", "url", "capturedAt"
 ]);
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
@@ -616,10 +623,7 @@ function renderGuideModal(state) {
             <li><strong>填写关键词</strong><span>支持逐条编辑、批量弹窗粘贴或 JSON 参数方式。</span></li>
             <li><strong>设置筛选并运行</strong><span>筛选项与页面中的排序依据、笔记类型、发布时间、搜索范围、位置距离一致；每个关键词会记录独立结果。</span></li>
           </ol>
-          <div class="xhs-schema-box">
-            <strong>采集字段</strong>
-            <code>pageOrder · cover · keyword · noteTitle · noteContent · author · likes · publishedAt · url · collectedAt</code>
-          </div>
+          ${renderFieldGuide({ fields: GUIDE_FIELDS, entityType: "content", contentType: "note", escapeHtml })}
         </div>
         <footer>
           <button class="xhs-primary-button" type="button" data-action="close-guide">知道了</button>
@@ -742,7 +746,7 @@ function renderData(state) {
       ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的 小红书笔记采集数据表格">
         <table class="xhs-table xhs-data-table">
-          ${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里" })}
+          ${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里", actionColumn: state.boundRunnerActions?.tableColumn(exportRows, escapeHtml, filteredRows) })}
         </table>
       </div>
     </section>
@@ -873,7 +877,7 @@ function normalizeStoredDataRow(row) {
   const capturedAt = row.capturedAt || new Date().toISOString();
   const publishedAtRaw = row.publishedAtRaw || row.publishedAt || row.time || "";
   const publishedAt = normalizeXiaohongshuPublishedDate(publishedAtRaw, { referenceDate: capturedAt });
-  return {
+  return withCanonicalRecord(FEATURE_KEY, {
     ...row,
     pageOrder: Number(row.pageOrder) || 0,
     description: row.description || row.desc || "",
@@ -884,7 +888,7 @@ function normalizeStoredDataRow(row) {
     publishedAtRaw,
     cover: row.cover || "",
     capturedAt
-  };
+  });
 }
 
 function mergeDataRows(state, keyword, data, task) {
@@ -892,7 +896,7 @@ function mergeDataRows(state, keyword, data, task) {
   const incoming = (data?.results || []).map((result, index) => {
     const publishedAtRaw = result.publishedAtRaw || result.publishedAt || result.time || "";
     const publishedAt = normalizeXiaohongshuPublishedDate(publishedAtRaw, { referenceDate: capturedAt });
-    return {
+    return withCanonicalRecord(FEATURE_KEY, {
       id: `${keyword}|${result.url || result.title}`,
       keyword,
       pageOrder: Number(result.order) || index + 1,
@@ -905,8 +909,9 @@ function mergeDataRows(state, keyword, data, task) {
       publishedAtRaw,
       cover: result.cover || "",
       url: result.url || "",
-      capturedAt
-    };
+      capturedAt,
+      rawPageText: result.rawPageText || data?.rawPageText || ""
+    });
   });
   const merged = mergeDataRowsByKey({
     currentRows: state.dataRows,
@@ -981,6 +986,26 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   const render = () => {
     if (!disposed) container.innerHTML = renderPage(state, context);
   };
+  state.boundRunnerActions = createBoundRunnerDataActions({
+    sourceFeatureId: FEATURE_KEY,
+    targets: boundRunnerTargets,
+    onResult({ target, response }) {
+      const merged = mergeBoundRunnerResultsIntoSourceRows({
+        sourceFeatureId: FEATURE_KEY,
+        target,
+        rows: state.dataRows,
+        response
+      });
+      if (merged.updatedCount) {
+        state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+        saveState(state);
+      }
+    },
+    onNotice(notice) {
+      if (notice) state.notice = notice;
+      render();
+    }
+  });
 
   const closeBatch = () => {
     state.batchOpen = false;
@@ -1072,7 +1097,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
 
   const runBoundRunners = async (control, rows, round) => {
     if (!state.config.autoRunBoundRunners || control.stopRequested) {
-      return { started: 0, completed: 0, failed: 0, resultCount: 0, addedCount: 0 };
+      return { started: 0, completed: 0, failed: 0, resultCount: 0, addedCount: 0, updatedCount: 0 };
     }
     const requests = buildAutomaticBoundRunnerRequests({
       sourceFeatureId: FEATURE_KEY,
@@ -1080,16 +1105,17 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       rows,
       forceUpdateData: state.config.forceUpdateData
     });
-    const summary = { started: 0, completed: 0, failed: 0, resultCount: 0, addedCount: 0 };
+    const summary = { started: 0, completed: 0, failed: 0, resultCount: 0, addedCount: 0, updatedCount: 0 };
 
     for (const [index, request] of requests.entries()) {
       if (control.stopRequested) break;
       const taskId = `${control.runId}-AUTO-${request.featureId.replace(/[^a-z0-9]+/gi, "-").toUpperCase()}-R${round}-${index + 1}`;
       control.activeRunnerTaskIds.add(taskId);
       summary.started += 1;
+      const inputCount = new Set(request.sourceBindings.flatMap((binding) => binding.inputs)).size;
       state.notice = {
         tone: "info",
-        text: `正在自动运行 ${request.target.name}：处理 ${request.parameters.postUrls?.length || 0} 条本轮笔记链接…`
+        text: `正在自动运行 ${request.target.name}：处理 ${inputCount} 条本轮输入…`
       };
       saveState(state);
       render();
@@ -1103,6 +1129,18 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
         }
         summary.resultCount += Number(response.resultCount) || 0;
         summary.addedCount += Number(response.addedCount) || 0;
+        const merged = mergeBoundRunnerResultsIntoSourceRows({
+          sourceFeatureId: FEATURE_KEY,
+          target: request.target,
+          rows: state.dataRows,
+          response
+        });
+        if (merged.updatedCount) {
+          state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+          summary.updatedCount += merged.updatedCount;
+          saveState(state);
+          render();
+        }
         if (response.status === "failed") {
           summary.failed += 1;
         } else {
@@ -1158,6 +1196,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     let autoRunnerFailedTotal = 0;
     let autoRunnerResultTotal = 0;
     let autoRunnerAddedTotal = 0;
+    let autoRunnerUpdatedTotal = 0;
     try {
       do {
         const round = completedRounds + 1;
@@ -1243,11 +1282,12 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
         autoRunnerFailedTotal += autoRunnerSummary.failed;
         autoRunnerResultTotal += autoRunnerSummary.resultCount;
         autoRunnerAddedTotal += autoRunnerSummary.addedCount;
+        autoRunnerUpdatedTotal += autoRunnerSummary.updatedCount;
         if (autoRunnerSummary.started) {
           const autoRunnerTone = autoRunnerSummary.failed ? "warning" : "success";
           state.notice = {
             tone: autoRunnerTone,
-            text: `第 ${round} 轮已自动运行 ${autoRunnerSummary.started} 个绑定 Runner：结果 ${autoRunnerSummary.resultCount} 条，新增 ${autoRunnerSummary.addedCount} 条${autoRunnerSummary.failed ? `，失败 ${autoRunnerSummary.failed} 个` : ""}。`
+            text: `第 ${round} 轮已自动运行 ${autoRunnerSummary.started} 个绑定 Runner：结果 ${autoRunnerSummary.resultCount} 条，回写 ${autoRunnerSummary.updatedCount} 条来源数据，新增 ${autoRunnerSummary.addedCount} 条${autoRunnerSummary.failed ? `，失败 ${autoRunnerSummary.failed} 个` : ""}。`
           };
           saveState(state);
           render();
@@ -1256,7 +1296,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
         if (!state.config.polling) {
           state.notice = {
             tone: roundFailed ? "warning" : "success",
-            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词${autoRunnerStartedTotal ? `；自动 Runner ${autoRunnerStartedTotal} 个，结果 ${autoRunnerResultTotal} 条，新增 ${autoRunnerAddedTotal} 条${autoRunnerFailedTotal ? `，失败 ${autoRunnerFailedTotal} 个` : ""}` : ""}；${getXiaohongshuFilterSummary(state.config)}`
+            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词${autoRunnerStartedTotal ? `；自动 Runner ${autoRunnerStartedTotal} 个，结果 ${autoRunnerResultTotal} 条，回写 ${autoRunnerUpdatedTotal} 条，新增 ${autoRunnerAddedTotal} 条${autoRunnerFailedTotal ? `，失败 ${autoRunnerFailedTotal} 个` : ""}` : ""}；${getXiaohongshuFilterSummary(state.config)}`
           };
           state.tab = addedTotal ? "data" : "records";
           break;
@@ -1348,6 +1388,11 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
     const action = button.dataset.action;
+
+    if (action === "run-bound-runner") {
+      await state.boundRunnerActions?.run(button.dataset.boundRunnerTarget, button.dataset.boundRunnerRowIndex);
+      return;
+    }
 
     if (await handleFeatureRunnerPanelAction(state.runnerPanel, action, {
       disabled: state.running,

@@ -55,6 +55,11 @@ export async function runXiaohongshuProfileInfoPageCommand(command) {
   };
 
   if (command === "inspect") return inspect();
-  if (command === "extract") return { profile: getProfile(), capturedAt: new Date().toISOString(), pageUrl: location.href };
+  if (command === "extract") return {
+    profile: getProfile(),
+    capturedAt: new Date().toISOString(),
+    pageUrl: location.href,
+    rawPageText: String(document.body?.innerText || "").trim()
+  };
   throw new Error(`未知的小红书博主信息页面命令：${command}`);
 }
