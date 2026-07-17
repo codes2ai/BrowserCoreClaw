@@ -23,9 +23,13 @@ BrowserCoreClaw 是一个 [Chrome Manifest V3](https://developer.chrome.com/docs
 - **平台化功能目录**：按 Google、微博、抖音、小红书等数据来源平台组织；首页从 JSON 配置动态生成。
 - **唯一控制台入口**：重复点击扩展图标会定位到同一个完整控制台标签页，不会重复创建功能界面；采集网站页面与控制台分离。
 - **独立任务执行**：关键词、主页链接或内容链接均可逐条或批量输入；输入超过 10 条时按页展示，批量编辑与任务运行仍处理完整列表；每批默认按顺序执行（并发数为 1），可按需提高至最多 3 个独立后台标签页任务；运行中的功能可切换到其他功能，任务会在后台继续执行。
+- **三种参数入口**：全部功能均提供“表单 / JSON / 运行器”页签。JSON 模式用于编辑普通运行参数；运行器模式展示带 `featureId` 的完整任务配置，可直接校验、创建、停止并跟踪后台任务。
+- **统一功能 Runner**：每项功能都以 `groupId/featureId` 注册独立 Runner，统一支持参数校验、批量并发、随机间隔、单项超时、停止、进度、标准结果和可选的数据写入；功能页面手动执行与功能间调用使用同一个后台入口。
+- **固定调用关系**：设置页提供“运行器”标签，可为任一来源功能配置多个允许调用的目标 Runner；当前只维护可调用白名单，为后续跨功能编排提供稳定配置，不会自动触发下游任务。
 - **页面稳定性控制**：在读取前等待目标区域、筛选状态或滚动加载结果稳定，降低“页面尚未刷新完成即采集”的概率。
 - **可控采集节奏**：主页类和关键词类功能支持随机间隔；支持循环监控的功能可按轮次持续运行，直至手动停止。
-- **记录与数据分离**：运行记录支持关键词/链接与状态筛选；点击任务编号可查看单次任务的状态、耗时、结果数量和错误信息。
+- **可选数据覆盖**：全部功能的运行选项均提供“强制更新数据”；默认按唯一键去重并保留已有记录，勾选后以本轮同键采集结果覆盖旧数据，不会把更新误计为新增。
+- **统一运行记录**：普通运行和 Runner 运行写入同一套功能运行记录；可按关键词/链接、状态和类型（普通运行 / 运行器）筛选，并分别展示页面获取的“结果数量”和去重入库的“新增数量”。点击任务编号可查看单次输入项的状态、父 Runner 任务、数量、耗时和错误信息。
 - **本地留存与导出**：每项功能的数据最多保留 3,000 条；运行记录按状态最多保留 200 条；数据页支持字段筛选、JSON 弹窗预览与一键复制，以及 UTF-8 BOM CSV 导出。
 
 ## 支持的平台与功能
@@ -42,6 +46,7 @@ BrowserCoreClaw 是一个 [Chrome Manifest V3](https://developer.chrome.com/docs
 | 小红书 | 关键词搜索 | 关键词与页面筛选项 | **需要** | 笔记卡片、作者、发布时间、点赞与链接 |
 | 小红书 | 博主博文采集 | 博主主页链接 | **需要** | 主页笔记卡片与页面顺序 |
 | 小红书 | 博主信息采集 | 博主主页链接 | **需要** | 公开资料、互动统计、标签与 IP 属地 |
+| 小红书 | 正文采集 | 笔记正文链接 | **需要** | 标题、描述、作者、媒体、话题与互动详情 |
 
 “不需要”表示扩展不会在运行前拦截登录状态；这并不代表平台不会要求登录、验证码或其他安全验证。遇到验证时，请在对应站点页面中自行完成处理后再重试。
 
@@ -49,9 +54,10 @@ BrowserCoreClaw 是一个 [Chrome Manifest V3](https://developer.chrome.com/docs
 
 ```mermaid
 flowchart LR
-  A[唯一完整控制台标签页<br/>功能界面] --> B[功能 Monitor<br/>参数、记录与数据视图]
+  A[唯一完整控制台标签页<br/>功能界面] --> B[功能 Monitor<br/>表单 / JSON / 运行器]
   B -->|chrome.runtime.sendMessage| C[Service Worker<br/>消息路由]
-  C --> D[功能 Background<br/>任务编排与状态控制]
+  C --> R[Runner Registry<br/>统一功能标识与任务执行]
+  R --> D[功能 Background<br/>单项页面采集与状态控制]
   D --> E[Tabs + Scripting API<br/>导航、等待、页面脚本]
   E --> F[独立目标网站标签页<br/>公开页面]
   D --> G[chrome.storage.local<br/>数据与运行记录]
@@ -62,9 +68,10 @@ flowchart LR
 每项功能遵循相同的职责边界：
 
 1. **界面层（`index.js` / `monitor.js`）**：维护输入、运行状态、记录和数据表。
-2. **后台层（`background.js`）**：为采集任务创建独立目标标签页，通过 Tabs 与 Scripting API 导航和执行页面命令，并处理停止信号与错误；不占用控制台标签页。
-3. **页面解析层（`page-extract.js`，按需提供）**：从页面公开 DOM 中读取数据，并判断筛选或列表是否稳定。
-4. **筛选与导出层（`data-table-filter.js`、`export-data.js`）**：按表格字段筛选本地结果，复制筛选后的 JSON，并导出筛选后的 CSV。
+2. **运行器层（`runner.js` / `src/runners/registry.js`）**：使用全局唯一功能标识接收完整参数，统一组织批量输入、并发、间隔、超时、停止、进度与结果。
+3. **后台层（`background.js`）**：执行单个输入项的目标页采集，通过 Tabs 与 Scripting API 导航和执行页面命令，并处理停止信号与错误；不占用控制台标签页。
+4. **页面解析层（`page-extract.js`，按需提供）**：从页面公开 DOM 中读取数据，并判断筛选或列表是否稳定。
+5. **筛选与导出层（`data-table-filter.js`、`export-data.js`）**：按表格字段筛选本地结果，复制筛选后的 JSON，并导出筛选后的 CSV。
 
 ## 快速开始
 
@@ -82,6 +89,8 @@ flowchart LR
 3. 点击“加载已解压的扩展程序”，选择本项目根目录。
 4. 点击扩展图标，Chrome 会打开 BrowserCoreClaw 完整控制台标签页；重复点击会定位到同一个控制台标签页。
 5. 修改源代码、配置或权限后，在扩展管理页点击“重新加载”。
+
+进入任意功能后，可以在运行参数区域选择“运行器”：点击“载入当前参数”生成完整 Runner JSON，校验通过后点击“创建任务”。任务编号、状态、进度、结果数量、新增数量、失败输入和耗时会显示在面板中；离开功能页面后任务仍在后台继续执行。Runner 的每个关键词或链接会实时合并到该功能原有的“运行记录”，类型显示为“运行器”，而从表单直接启动的记录显示为“普通运行”。运行选项中的“强制更新数据”会同步写入 JSON 和 Runner 配置：不勾选时同键数据保留旧值，勾选后才以本次结果覆盖。
 
 ### 校验与打包
 
@@ -128,10 +137,12 @@ BrowserCoreClaw/
 │   ├── app/                              # 首页、配置加载、功能路由与通用样式
 │   ├── background/                       # Service Worker 消息路由、标签页脚本客户端
 │   ├── config/groups.json                # 平台分组与功能入口的唯一配置源
+│   ├── runners/                           # Runner 注册表
 │   ├── groups/
 │   │   └── <platform>/<feature>/          # 每项功能的独立实现目录
 │   │       ├── index.js                  # 功能挂载入口
 │   │       ├── monitor.js                # 页面状态、任务记录与数据界面
+│   │       ├── runner.js                 # 标准功能运行器
 │   │       ├── background.js             # 后台采集任务（按需）
 │   │       ├── page-extract.js           # 页面稳定性与数据解析（按需）
 │   │       ├── export-data.js            # JSON 序列化 / CSV 数据导出（按需）
@@ -156,6 +167,7 @@ BrowserCoreClaw/
   "id": "feature-id",
   "name": "功能名称",
   "description": "显示在首页问号提示中的功能简介",
+  "runner": "src/groups/<platform>/<feature>/runner.js",
   "entry": "src/groups/<platform>/<feature>/index.js",
   "style": "src/groups/<platform>/<feature>/styles.css"
 }
@@ -166,9 +178,9 @@ BrowserCoreClaw/
 ### 新增一项采集功能
 
 1. 在 `src/groups/<platform-id>/<feature-id>/` 新建独立功能目录，并在 `index.js` 中导出 `mount(container, context)`。
-2. 按需要实现 `monitor.js`、`background.js`、`page-extract.js`、`export-data.js`、`constants.js` 与 `styles.css`。
-3. 在 `src/config/groups.json` 注册 `entry` 和 `style`；入口与样式必须位于该功能的独立目录内。
-4. 在 `src/background/service-worker.js` 注册采集与停止消息，使功能界面能够与后台任务通信。
+2. 按需要实现 `monitor.js`、`runner.js`、`background.js`、`page-extract.js`、`export-data.js`、`constants.js` 与 `styles.css`。
+3. 在 `src/config/groups.json` 注册 `runner`、`entry` 和 `style`；这些文件必须位于该功能的独立目录内。
+4. 在 `src/runners/registry.js` 注册 Runner；单项采集消息仍由 `src/background/service-worker.js` 负责路由。
 5. 在 `doc/<platform-id>/<feature-id>.md` 补充功能目的、输入、流程、字段、数据留存和注意事项，并在本 README 的功能表中登记。
 6. 执行 `npm run check`；通过后重新加载扩展并进行真实页面回归测试。
 
@@ -203,6 +215,7 @@ BrowserCoreClaw/
 | 小红书 | 关键词搜索 | [查看文档](doc/xiaohongshu/keyword-search.md) |
 | 小红书 | 博主博文采集 | [查看文档](doc/xiaohongshu/profile-notes.md) |
 | 小红书 | 博主信息采集 | [查看文档](doc/xiaohongshu/profile-info.md) |
+| 小红书 | 正文采集 | [查看文档](doc/xiaohongshu/post-detail.md) |
 
 ---
 

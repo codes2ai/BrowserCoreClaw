@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>全局头部视觉对照</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px; background: #eef1ee; color: #18201c; font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+  h1 { margin: 0 0 16px; font-size: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  figure { margin: 0; overflow: hidden; border: 1px solid #d7ded8; border-radius: 10px; background: white; }
+  figcaption { padding: 10px 12px; border-bottom: 1px solid #e4e9e5; font-size: 13px; font-weight: 700; }
+  img { display: block; width: 100%; height: 72px; }
+  .reference { object-fit: fill; }
+  .implementation { object-fit: cover; object-position: top; }
+  p { margin: 14px 0 0; color: #66716a; font-size: 12px; line-height: 1.6; }
+</style>
+<h1>全局头部：参考与实现</h1>
+<div class="grid">
+  <figure><figcaption>参考图：全局导航样式</figcaption><img class="reference" src="reference-global-header.png" alt="用户提供的全局头部参考图"></figure>
+  <figure><figcaption>实现图：功能页上的全局导航</figcaption><img class="implementation" src="header-feature-google-desktop.png" alt="实现后的功能页全局头部"></figure>
+</div>
+<p>对照目标：左侧品牌、右侧主导航、底部激活标记与轻量分隔线。</p>
+</html>

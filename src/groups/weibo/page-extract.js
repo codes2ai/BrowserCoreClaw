@@ -28,6 +28,16 @@ export async function runWeiboPageCommand(command, options = {}) {
       return /(^|\.)weibo\.com$/i.test(url.hostname) && parts.length >= 2 && /^\d+$/.test(parts.at(-2) || "");
     } catch { return false; }
   };
+  const isPublishedAtText = (value) => /^(?:(?:\d{2}|\d{4})\s*[-/.年]\s*\d{1,2}\s*[-/.月]\s*\d{1,2}\s*日?\s+\d{1,2}:\d{2}(?::\d{2})?|\d{1,2}\s*(?:[-/.]|月)\s*\d{1,2}\s*日?\s+\d{1,2}:\d{2}|(?:今天|昨天|前天)\s+\d{1,2}:\d{2}|\d+\s*(?:分钟|小时)前)$/.test(normalText(value));
+  const normalizePublishedAt = (value) => normalText(value).replace(/^(\d{2})(?=-\d{1,2}-\d{1,2}\s)/, "20$1");
+  const publishedAtFromCard = (card) => {
+    const candidates = [...(card?.querySelectorAll("a[href]") || [])]
+      .filter((link) => isPostUrl(link.href))
+      .flatMap((link) => [link.getAttribute("title"), link.innerText])
+      .map(normalText)
+      .filter(Boolean);
+    return normalizePublishedAt(candidates.find(isPublishedAtText) || "");
+  };
   const postLink = (card) => [...card.querySelectorAll("a[href]")].find((link) => isPostUrl(link.href)) || null;
   const getPostCards = () => [...document.querySelectorAll("article.woo-panel-main")]
     .filter((card) => isVisible(card) && card.querySelector(".wbpro-feed-content") && postLink(card));
@@ -137,6 +147,10 @@ export async function runWeiboPageCommand(command, options = {}) {
     const pageText = normalText(document.body?.innerText);
     const cards = getPostCards();
     const profile = getProfile();
+    const hasLoginEntry = [...document.querySelectorAll("a, button, [role='button']")]
+      .filter(isVisible)
+      .map((element) => normalText(element.innerText || element.getAttribute("aria-label") || element.getAttribute("title")))
+      .some((label) => /^(?:登录|注册|登录\/注册|立即登录|账号登录)$/.test(label));
     return {
       href: location.href,
       readyState: document.readyState,
@@ -148,7 +162,7 @@ export async function runWeiboPageCommand(command, options = {}) {
       postSignature: getPostSignature(),
       noPosts: /暂无微博|还没有微博|暂无内容/.test(pageText),
       captcha: /安全验证|验证码|访问频繁|操作频繁|请完成验证/.test(pageText),
-      requiresLogin: /登录后即可查看|请登录后查看/.test(pageText)
+      requiresLogin: hasLoginEntry || /登录后即可查看|请登录后查看|登录后查看更多/.test(pageText)
     };
   };
   const extractPosts = (limit) => {
@@ -171,7 +185,7 @@ export async function runWeiboPageCommand(command, options = {}) {
         postId,
         author: normalText(card.querySelector("a[usercard] span[title]")?.getAttribute("title") || card.querySelector("a[usercard]")?.innerText),
         text: normalText(card.querySelector("[class*='wbtext']")?.innerText),
-        publishedAt: normalText(link?.getAttribute("title") || link?.innerText),
+        publishedAt: publishedAtFromCard(card),
         source: normalText(card.querySelector("[class*='source']")?.innerText),
         reposts: counts.reposts,
         comments: counts.comments,
@@ -217,7 +231,7 @@ export async function runWeiboPageCommand(command, options = {}) {
         authorUrl: asUrl(authorLink?.href || ""),
         authorAvatar: authorImage?.currentSrc || authorImage?.src || "",
         text: normalText(content?.querySelector("[class*='wbtext']")?.innerText || content?.innerText),
-        publishedAt: normalText(canonicalLink?.getAttribute("title") || canonicalLink?.innerText),
+        publishedAt: publishedAtFromCard(card),
         source: normalText(card.querySelector("[class*='source']")?.innerText),
         reposts: counts.reposts,
         comments: counts.comments,
@@ -238,6 +252,16 @@ export async function runWeiboPageCommand(command, options = {}) {
   if (command === "extract-profile") return { profile: getProfile(), capturedAt: new Date().toISOString(), pageUrl: location.href };
   if (command === "inspect-detail") return inspectDetail();
   if (command === "extract-detail") return extractDetail();
-  if (command === "scroll") { window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "smooth" }); return true; }
+  if (command === "scroll") {
+    const viewportHeight = Math.max(480, Number(window.innerHeight) || 720);
+    const minimumRatio = Math.max(0.35, Math.min(0.85, Number(options.minimumRatio) || 0.55));
+    const maximumRatio = Math.max(minimumRatio, Math.min(1.1, Number(options.maximumRatio) || 0.9));
+    const distance = Math.round(viewportHeight * (minimumRatio + Math.random() * (maximumRatio - minimumRatio)));
+    const from = Math.max(0, Number(window.scrollY) || 0);
+    const maximumTop = Math.max(0, document.documentElement.scrollHeight - viewportHeight);
+    const to = Math.min(maximumTop, from + distance);
+    window.scrollTo({ top: to, behavior: "smooth" });
+    return { from, to, distance: Math.max(0, to - from), maximumTop, reachedEnd: to >= maximumTop };
+  }
   throw new Error(`未知的微博页面命令：${command}`);
 }

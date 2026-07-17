@@ -1,8 +1,12 @@
-import { buildXiaohongshuKeywordExportRows, downloadXiaohongshuKeywordData } from "./export-data.js";
+import { buildXiaohongshuKeywordExportRows } from "./export-data.js";
 import {
   MESSAGE_CAPTURE_XIAOHONGSHU_KEYWORD,
   MESSAGE_STOP_XIAOHONGSHU_KEYWORD
 } from "./constants.js";
+import {
+  MESSAGE_EXECUTE_FEATURE_RUNNER,
+  MESSAGE_STOP_FEATURE_RUNNER
+} from "../../../background/runner-messages.js";
 import {
   getXiaohongshuFilterLabel,
   getXiaohongshuFilterSummary,
@@ -16,6 +20,11 @@ import {
   tagTaskDataRow
 } from "../../../shared/task-detail.js";
 import {
+  getTaskExecutionTypeLabel,
+  normalizeTaskExecutionType,
+  TASK_EXECUTION_TYPE_MANUAL
+} from "../../../shared/task-record-type.js";
+import {
   DEFAULT_TASK_CONCURRENCY,
   MAX_TASK_CONCURRENCY,
   normalizeTaskConcurrency,
@@ -24,6 +33,14 @@ import {
 import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
 import { normalizeXiaohongshuPublishedDate } from "../date-normalizer.js";
+import { normalizeXiaohongshuLikes } from "../likes-normalizer.js";
+import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
+import {
+  buildAutomaticBoundRunnerRequests,
+  getAutoRunnableBoundRunnerTargets,
+  normalizeAutoRunBoundRunners,
+  normalizeBoundRunnerTargets
+} from "../../../shared/bound-runner-automation.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -48,6 +65,25 @@ import {
   openRowsJsonPreview,
   renderDataFilterPanel
 } from "../../../shared/data-table-filter.js";
+import {
+  createDataColumnVisibility,
+  downloadDataRowsCsv,
+  projectDataRowsByColumns,
+  renderConfiguredDataTable,
+  renderDataColumnSettingsPanel,
+  scheduleDataColumnRender,
+  showAllDataColumns
+} from "../../../shared/data-column-settings.js";
+import {
+  getFeatureRunnerPanelState,
+  handleFeatureRunnerPanelAction,
+  renderFeatureRunnerModeButton,
+  renderFeatureRunnerPanel,
+  subscribeFeatureRunnerPanel,
+  syncFeatureRunnerDraft,
+  updateFeatureRunnerDraft
+} from "../../../shared/feature-runner-panel.js";
+import { renderPageParametersCard } from "../../../shared/page-parameters.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuKeywordV1";
 const FEATURE_KEY = "xiaohongshu/keyword-search";
@@ -62,9 +98,22 @@ const DATA_FILTER_DEFINITIONS = Object.freeze([
   { key: "likes", label: "点赞" },
   { key: "url", label: "链接" }
 ]);
+const DATA_COLUMNS = Object.freeze([
+  { key: "pageOrder", label: "顺序" },
+  { key: "cover", label: "封面", type: "image" },
+  { key: "keyword", label: "关键词" },
+  { key: "noteTitle", label: "笔记标题", type: "long" },
+  { key: "noteContent", label: "笔记正文", type: "long" },
+  { key: "author", label: "作者" },
+  { key: "publishedAt", label: "发布时间" },
+  { key: "likes", label: "点赞" },
+  { key: "url", label: "链接", type: "link" },
+  { key: "collectedAt", label: "采集时间" }
+]);
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
   success: { label: "完成", tone: "success" },
+  empty: { label: "无数据", tone: "success" },
   partial: { label: "部分完成", tone: "warning" },
   error: { label: "失败", tone: "error" },
   stopped: { label: "已停止", tone: "stopped" },
@@ -77,6 +126,8 @@ const SAMPLE_CONFIG = Object.freeze({
   keywordIntervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS,
   concurrency: DEFAULT_TASK_CONCURRENCY,
   ...normalizeXiaohongshuFilters(),
+  forceUpdateData: false,
+  autoRunBoundRunners: false,
   polling: false,
   pollingMinutes: 10
 });
@@ -124,6 +175,12 @@ function normalizeConfig(input) {
   if (!keywords.length) {
     throw new Error("请至少保留一个非空关键词。");
   }
+  if (input.forceUpdateData !== undefined && typeof input.forceUpdateData !== "boolean") {
+    throw new Error("forceUpdateData 必须是布尔值 true 或 false。");
+  }
+  if (input.autoRunBoundRunners !== undefined && typeof input.autoRunBoundRunners !== "boolean") {
+    throw new Error("autoRunBoundRunners 必须是布尔值 true 或 false。");
+  }
 
   const legacyIntervalMs = input.keywordIntervalSeconds !== undefined
     ? Number(input.keywordIntervalSeconds) * 1000
@@ -149,6 +206,8 @@ function normalizeConfig(input) {
     ...intervalRange,
     concurrency: normalizeTaskConcurrency(input.concurrency),
     ...normalizeXiaohongshuFilters(input),
+    forceUpdateData: normalizeForceUpdateData(input.forceUpdateData),
+    autoRunBoundRunners: normalizeAutoRunBoundRunners(input.autoRunBoundRunners),
     polling: Boolean(input.polling),
     pollingMinutes: asInteger(input.pollingMinutes, SAMPLE_CONFIG.pollingMinutes, 1, 1440)
   };
@@ -181,6 +240,7 @@ export function getRecordStatusKey(record) {
   }
   const status = String(record?.status || "");
   if (/停止/.test(status)) return "stopped";
+  if (/无数据/.test(status)) return "empty";
   if (/部分/.test(status)) return "partial";
   if (/失败|打开失败/.test(status)) return "error";
   if (/完成/.test(status)) return "success";
@@ -205,7 +265,9 @@ function normalizeRecord(record, index = 0) {
     status: normalized.status || RECORD_STATUS_META[statusKey].label,
     statusKey,
     tone: normalized.tone || RECORD_STATUS_META[statusKey].tone,
+    executionType: normalizeTaskExecutionType(normalized),
     resultCount: Number(normalized.resultCount) || 0,
+    addedCount: Number(normalized.addedCount) || 0,
     duration: normalized.duration || "-"
   });
 }
@@ -308,6 +370,7 @@ function saveState(state) {
     config: state.config,
     records: limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
     dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
+    dataColumnVisibility: state.dataColumnVisibility,
     notice: state.notice
   };
   chrome.storage.local.set({ [STORAGE_KEY]: value }).catch(() => {});
@@ -387,25 +450,86 @@ function renderJsonMode(state) {
   `;
 }
 
+function renderBoundRunnerOptions(state) {
+  const targets = state.boundRunnerTargets || [];
+  if (!targets.length) return "";
+  const autoRunnableTargets = state.autoRunnableBoundRunnerTargets || [];
+  const autoRunnableCount = autoRunnableTargets.filter((target) => target.autoRunnable).length;
+  const controlsLocked = state.running ? "disabled" : "";
+  const enabled = state.config.autoRunBoundRunners && autoRunnableCount > 0;
+
+  return `
+    <section class="xhs-bound-runner-config" aria-label="绑定的运行器配置">
+      <header>
+        <div>
+          <strong>绑定的运行器</strong>
+          <small>由“设置 / 运行器”统一配置；本功能会读取当前已绑定的目标。</small>
+        </div>
+        <span>${targets.length} 个已绑定</span>
+      </header>
+      <div class="xhs-bound-runner-list">
+        ${autoRunnableTargets.map((target) => `
+          <div class="xhs-bound-runner-item ${target.autoRunnable ? "is-runnable" : ""}">
+            <div><strong>${escapeHtml(target.name)}</strong><code>${escapeHtml(target.id)}</code></div>
+            <small>${target.autoRunnable
+              ? `本轮采集到的${escapeHtml(target.inputLabel)}会作为 Runner 输入。`
+              : "当前没有可用的输入映射，仅保留为手动 Runner 调用能力。"}</small>
+          </div>
+        `).join("")}
+      </div>
+      <label class="xhs-switch-control xhs-bound-runner-switch ${autoRunnableCount ? "" : "is-disabled"}">
+        <input type="checkbox" data-field="autoRunBoundRunners" ${enabled ? "checked" : ""} ${controlsLocked || !autoRunnableCount ? "disabled" : ""}>
+        <span>
+          <strong>自动运行运行器</strong>
+          <small>${autoRunnableCount
+            ? "当前功能成功采集后，将仅把本轮结果中的兼容链接交给上方 Runner；不会读取历史数据。"
+            : "当前绑定目标没有可自动转换的输入，因此不能自动运行。"}</small>
+        </span>
+      </label>
+    </section>
+  `;
+}
+
+function renderPageParameters(state) {
+  const pageControls = XIAOHONGSHU_FILTER_GROUPS.map((group) => `
+    <label class="xhs-control">
+      <span>${escapeHtml(group.label)}</span>
+      <select data-field="${escapeHtml(group.key)}" ${state.running ? "disabled" : ""}>
+        ${group.options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${state.config[group.key] === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
+      </select>
+      <small>与小红书搜索页“${escapeHtml(group.label)}”筛选项一致。</small>
+    </label>
+  `).join("");
+
+  return renderPageParametersCard({
+    prefix: "xhs",
+    open: state.pageParametersOpen,
+    description: "页面参数会在每个关键词对应的小红书搜索页加载后依次应用；运行选项仅控制任务调度与存储行为。",
+    body: pageControls,
+    configuredCount: XIAOHONGSHU_FILTER_GROUPS.length
+  });
+}
+
 function renderRunOptions(state) {
   return `
     <section class="xhs-options-card">
       <button class="xhs-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
         <span class="xhs-options-title">
           <strong>运行选项</strong>
-          <small>调整条数、并发任务、页面筛选、间隔和轮询</small>
+          <small>调整条数、并发任务、间隔和轮询</small>
         </span>
         <span class="xhs-option-summary" aria-label="当前运行选项摘要">
           <span><small>关键词</small><strong>${state.config.keywords.length}</strong></span>
           <span><small>每词条数</small><strong>${state.config.limit}</strong></span>
           <span><small>并发任务</small><strong>${state.config.concurrency}</strong></span>
           <span><small>关键词间隔</small><strong>${formatKeywordIntervalRange(state.config)}</strong></span>
+          ${state.boundRunnerTargets.length ? `<span><small>绑定 Runner</small><strong>${state.boundRunnerTargets.length}</strong></span>` : ""}
         </span>
         <span class="xhs-options-toggle-label">${state.optionsOpen ? "收起选项" : "展开选项"}</span>
       </button>
       ${state.optionsOpen ? `
         <div class="xhs-options-body">
-          <p class="xhs-options-note">每个关键词都是独立任务。并发任务使用当前登录会话的独立后台标签页，并分别应用排序、笔记类型、发布时间、搜索范围和位置距离筛选。</p>
+          <p class="xhs-options-note">每个关键词都是独立任务。并发任务使用当前登录会话的独立后台标签页；页面筛选在上方“页面参数”中配置。</p>
           <div class="xhs-options-grid">
             <label class="xhs-control">
               <span>每个关键词结果数</span>
@@ -432,17 +556,12 @@ function renderRunOptions(state) {
               </div>
               <small>每个关键词完成后，会在 ${formatKeywordIntervalRange(state.config)} 内重新随机等待。</small>
             </label>
-            ${XIAOHONGSHU_FILTER_GROUPS.map((group) => `
-              <label class="xhs-control">
-                <span>${escapeHtml(group.label)}</span>
-                <select data-field="${escapeHtml(group.key)}" ${state.running ? "disabled" : ""}>
-                  ${group.options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${state.config[group.key] === value ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}
-                </select>
-                <small>与小红书搜索页“${escapeHtml(group.label)}”筛选项一致。</small>
-              </label>
-            `).join("")}
           </div>
           <div class="xhs-polling-row">
+            <label class="xhs-switch-control">
+              <input type="checkbox" data-field="forceUpdateData" ${state.config.forceUpdateData ? "checked" : ""} ${state.running ? "disabled" : ""}>
+              <span><strong>强制更新数据</strong><small>遇到相同笔记时，使用本次采集结果覆盖本地旧数据。</small></span>
+            </label>
             <label class="xhs-switch-control">
               <input type="checkbox" data-field="polling" ${state.config.polling ? "checked" : ""} ${state.running ? "disabled" : ""}>
               <span><strong>循环监控</strong><small>每轮完成后等待设定周期，再自动开始下一轮，直到手动停止。</small></span>
@@ -455,6 +574,7 @@ function renderRunOptions(state) {
               </div>
             </label>
           </div>
+          ${renderBoundRunnerOptions(state)}
         </div>
       ` : ""}
     </section>
@@ -462,15 +582,21 @@ function renderRunOptions(state) {
 }
 
 function renderParameters(state) {
+  const controlsLocked = state.running || state.runnerPanel.running;
   return `
     <section class="xhs-parameter-card">
       <div class="xhs-mode-switch" role="tablist" aria-label="参数编辑方式">
-        <button class="${state.mode === "form" ? "active" : ""}" type="button" data-action="set-mode" data-mode="form" ${state.running ? "disabled" : ""}>表单</button>
-        <button class="${state.mode === "json" ? "active" : ""}" type="button" data-action="set-mode" data-mode="json" ${state.running ? "disabled" : ""}>JSON</button>
+        <button class="${state.mode === "form" ? "active" : ""}" type="button" data-action="set-mode" data-mode="form" ${controlsLocked ? "disabled" : ""}>表单</button>
+        <button class="${state.mode === "json" ? "active" : ""}" type="button" data-action="set-mode" data-mode="json" ${controlsLocked ? "disabled" : ""}>JSON</button>
+        <button class="${state.mode === "runner" ? "active" : ""}" type="button" data-action="set-mode" data-mode="runner" ${controlsLocked ? "disabled" : ""}>运行器</button>
       </div>
-      ${state.mode === "form" ? renderFormMode(state) : renderJsonMode(state)}
+      ${state.mode === "form"
+        ? renderFormMode(state)
+        : state.mode === "json"
+          ? renderJsonMode(state)
+          : renderFeatureRunnerPanel(state.runnerPanel, { escapeHtml, disabled: state.running })}
     </section>
-    ${renderRunOptions(state)}
+    ${state.mode === "runner" ? "" : `${renderPageParameters(state)}${renderRunOptions(state)}`}
   `;
 }
 
@@ -508,15 +634,23 @@ function renderRecordStatus(record) {
   return `<span class="xhs-table-status ${escapeHtml(tone)}">${escapeHtml(record.status)}</span>`;
 }
 
+function renderExecutionType(record) {
+  const executionType = normalizeTaskExecutionType(record);
+  return `<span class="task-execution-type ${executionType}">${escapeHtml(getTaskExecutionTypeLabel(executionType))}</span>`;
+}
+
 export function filterRecords(records, filters = {}) {
   const keywordFilter = filters.keyword || ALL_RECORD_FILTER;
   const statusFilter = filters.status || ALL_RECORD_FILTER;
+  const executionTypeFilter = filters.executionType || ALL_RECORD_FILTER;
   return (Array.isArray(records) ? records : []).filter((record) => {
     const keywordMatches = keywordFilter === ALL_RECORD_FILTER
       || record.keyword === keywordFilter;
     const statusMatches = statusFilter === ALL_RECORD_FILTER
       || getRecordStatusKey(record) === statusFilter;
-    return keywordMatches && statusMatches;
+    const executionTypeMatches = executionTypeFilter === ALL_RECORD_FILTER
+      || normalizeTaskExecutionType(record) === executionTypeFilter;
+    return keywordMatches && statusMatches && executionTypeMatches;
   });
 }
 
@@ -540,6 +674,14 @@ function renderRecordFilters(state, filteredCount) {
           ${statusOptions.map(([statusKey, meta]) => `<option value="${statusKey}" ${state.recordFilters.status === statusKey ? "selected" : ""}>${meta.label}</option>`).join("")}
         </select>
       </label>
+      <label class="xhs-filter-control">
+        <span>类型</span>
+        <select data-record-filter="executionType">
+          <option value="${ALL_RECORD_FILTER}">全部类型</option>
+          <option value="manual" ${state.recordFilters.executionType === "manual" ? "selected" : ""}>普通运行</option>
+          <option value="runner" ${state.recordFilters.executionType === "runner" ? "selected" : ""}>运行器</option>
+        </select>
+      </label>
       <span class="xhs-filter-result">显示 ${filteredCount} / ${state.records.length} 条</span>
     </div>
   `;
@@ -555,19 +697,21 @@ function renderRecords(state) {
       ${renderRecordFilters(state, records.length)}
       <div class="xhs-table-shell records" tabindex="0" aria-label="可滚动的运行记录表格">
         <table class="xhs-table">
-          <thead><tr><th>任务编号</th><th>开始时间</th><th>关键词</th><th>轮次</th><th>状态</th><th>数据量</th><th>耗时</th></tr></thead>
+          <thead><tr><th>任务编号</th><th>类型</th><th>开始时间</th><th>关键词</th><th>轮次</th><th>状态</th><th>结果数量</th><th>新增数量</th><th>耗时</th></tr></thead>
           <tbody>
             ${records.length ? records.map((record) => `
               <tr>
                 <td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}" title="查看当前关键词任务明细"><code>${escapeHtml(getTaskId(record))}</code></button></td>
+                <td>${renderExecutionType(record)}</td>
                 <td>${escapeHtml(record.startedAt)}</td>
                 <td>${escapeHtml(record.keyword || "-")}</td>
                 <td>${escapeHtml(record.round || "-")}</td>
                 <td title="${escapeHtml(record.error || "")}">${renderRecordStatus(record)}</td>
                 <td>${record.resultCount}</td>
+                <td>${record.addedCount}</td>
                 <td>${escapeHtml(record.duration || "-")}</td>
               </tr>
-            `).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}
+            `).join("") : `<tr><td class="xhs-table-empty" colspan="9">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -588,30 +732,17 @@ function renderTaskDetails(state) {
 
 function renderData(state) {
   const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+  const exportRows = buildXiaohongshuKeywordExportRows(filteredRows);
   return `
     <section class="xhs-content-card xhs-table-page">
       <div class="xhs-panel-head">
         <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；每次搜索结果均按页面卡片的原始顺序保存。</p></div>
+        ${renderDataColumnSettingsPanel({ columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, expanded: state.dataColumnsOpen, escapeHtml })}
       </div>
       ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的 小红书笔记采集数据表格">
         <table class="xhs-table xhs-data-table">
-          <thead><tr><th>顺序</th><th>封面</th><th>关键词</th><th>笔记标题</th><th>笔记正文</th><th>作者</th><th>发布时间</th><th>点赞</th><th>链接</th></tr></thead>
-          <tbody>
-            ${filteredRows.length ? filteredRows.map((row) => `
-              <tr>
-                <td>${row.pageOrder || "-"}</td>
-                <td>${row.cover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.cover)}" alt="" loading="lazy">` : "-"}</td>
-                <td>${escapeHtml(row.keyword)}</td>
-                <td class="xhs-title-cell" title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</td>
-                <td class="xhs-description-cell" title="${escapeHtml(row.description || row.desc || "")}">${escapeHtml(row.description || row.desc || "-")}</td>
-                <td>${escapeHtml(row.author || row.source || "-")}</td>
-                <td>${escapeHtml(row.time || "-")}</td>
-                <td>${escapeHtml(row.likes || "-")}</td>
-                <td><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a></td>
-              </tr>
-            `).join("") : `<tr><td class="xhs-table-empty" colspan="9">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里"}</td></tr>`}
-          </tbody>
+          ${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，按小红书搜索页面顺序采集的笔记结果会显示在这里" })}
         </table>
       </div>
     </section>
@@ -651,6 +782,14 @@ function renderBatchModal(state) {
 }
 
 function renderRunButton(state, className = "") {
+  if (state.mode === "runner") {
+    return renderFeatureRunnerModeButton(state.runnerPanel, {
+      className,
+      primaryClass: "xhs-primary-button",
+      stopClass: "xhs-stop-button",
+      disabled: state.running
+    });
+  }
   if (state.running) {
     return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`;
   }
@@ -659,11 +798,18 @@ function renderRunButton(state, className = "") {
 
 function renderActionBar(state) {
   if (state.tab === "params") {
+    const runnerMode = state.mode === "runner";
     return `
       <footer class="xhs-action-bar">
         ${renderRunButton(state)}
-        <button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原示例输入</button>
-        <span>${state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : "运行会打开小红书搜索页，应用筛选并按页面顺序采集笔记。"}</span>
+        <button class="xhs-secondary-button" type="button" data-action="reset" ${state.running || state.runnerPanel.running ? "disabled" : ""}>还原示例输入</button>
+        <span>${runnerMode
+          ? state.runnerPanel.running
+            ? "Runner 后台任务运行中，配置已锁定；可点击停止终止任务。"
+            : "运行器会校验功能 ID 与 JSON 参数，然后创建可跟踪的后台任务。"
+          : state.running
+            ? "任务运行中，参数已锁定；可点击停止终止任务。"
+            : "运行会打开小红书搜索页，应用筛选并按页面顺序采集笔记。"}</span>
       </footer>
     `;
   }
@@ -732,7 +878,7 @@ function normalizeStoredDataRow(row) {
     pageOrder: Number(row.pageOrder) || 0,
     description: row.description || row.desc || "",
     author: row.author || row.source || "",
-    likes: row.likes || "",
+    likes: normalizeXiaohongshuLikes(row.likes),
     time: publishedAt,
     publishedAt,
     publishedAtRaw,
@@ -753,7 +899,7 @@ function mergeDataRows(state, keyword, data, task) {
       title: result.title || "",
       description: result.description || result.desc || "",
       author: result.author || result.source || "",
-      likes: result.likes || "",
+      likes: normalizeXiaohongshuLikes(result.likes),
       time: publishedAt,
       publishedAt,
       publishedAtRaw,
@@ -762,16 +908,15 @@ function mergeDataRows(state, keyword, data, task) {
       capturedAt
     };
   });
-  const existingById = new Map(state.dataRows.map((row) => [row.id, row]));
-  const taggedIncoming = incoming.map((row) => tagTaskDataRow({ ...existingById.get(row.id), ...row }, task));
-  const incomingIds = new Set(taggedIncoming.map((row) => row.id));
-  const priorIds = new Set(state.dataRows.map((row) => row.id));
-  const added = taggedIncoming.filter((row) => !priorIds.has(row.id)).length;
-  state.dataRows = applyItemLimit([
-    ...taggedIncoming,
-    ...state.dataRows.filter((row) => !incomingIds.has(row.id))
-  ], state.dataStorageLimit);
-  return added;
+  const merged = mergeDataRowsByKey({
+    currentRows: state.dataRows,
+    incomingRows: incoming,
+    getKey: (row) => row.id,
+    forceUpdateData: state.config.forceUpdateData,
+    mergeRow: (previous, row) => tagTaskDataRow({ ...previous, ...row }, task)
+  });
+  state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+  return merged.addedCount;
 }
 
 export async function mountXiaohongshuKeywordMonitor(container, context) {
@@ -786,9 +931,16 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     legacyMinMs: 100,
     legacyMaxMs: 1000
   });
+  const runnerPanel = getFeatureRunnerPanelState(FEATURE_KEY);
+  const boundRunnerTargets = normalizeBoundRunnerTargets(context?.boundRunnerTargets);
+  const autoRunnableBoundRunnerTargets = getAutoRunnableBoundRunnerTargets(
+    FEATURE_KEY,
+    boundRunnerTargets
+  );
   const state = {
     tab: "params",
-    mode: "form",
+    mode: runnerPanel.running ? "runner" : "form",
+    runnerPanel,
     config: savedConfig ? normalizeConfig(savedConfig) : cloneSampleConfig(),
     jsonDraft: "",
     batchOpen: false,
@@ -797,14 +949,19 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     guideOpen: false,
     taskDetailRecordId: "",
     optionsOpen: false,
+    pageParametersOpen: false,
     running: Boolean(activeXiaohongshuKeywordRun),
     stopping: Boolean(activeXiaohongshuKeywordRun?.stopRequested),
-    recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
+    recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER, executionType: ALL_RECORD_FILTER },
     dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS),
     dataFiltersOpen: true,
+    dataColumnVisibility: createDataColumnVisibility(DATA_COLUMNS, saved?.dataColumnVisibility),
+    dataColumnsOpen: false,
     notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。设置筛选条件后点击运行，扩展会按页面顺序采集搜索结果。" },
     dataStorageLimit: storageLimits.dataStorageLimit,
     taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit,
+    boundRunnerTargets,
+    autoRunnableBoundRunnerTargets,
     records: limitRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit),
     dataRows: Array.isArray(saved?.dataRows)
       ? applyItemLimit(
@@ -884,6 +1041,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     const record = {
       id: `${control.runId}-R${round}-K${keywordIndex + 1}`,
       runId: control.runId,
+      executionType: TASK_EXECUTION_TYPE_MANUAL,
       startedAt: formatTime(new Date(startedAtMs)),
       keyword,
       round,
@@ -891,6 +1049,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       statusKey: "running",
       tone: RECORD_STATUS_META.running.tone,
       resultCount: 0,
+      addedCount: 0,
       duration: "-",
       error: ""
     };
@@ -899,15 +1058,67 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     return { record, startedAtMs };
   };
 
-  const finishRecord = (record, startedAtMs, statusKey, resultCount = 0, error = "") => {
+  const finishRecord = (record, startedAtMs, statusKey, resultCount = 0, addedCount = 0, error = "") => {
     const meta = RECORD_STATUS_META[statusKey] || RECORD_STATUS_META.error;
     record.status = meta.label;
     record.statusKey = statusKey;
     record.tone = meta.tone;
     record.resultCount = resultCount;
+    record.addedCount = addedCount;
     record.error = error;
     record.duration = formatDuration(Date.now() - startedAtMs);
     state.records = limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit);
+  };
+
+  const runBoundRunners = async (control, rows, round) => {
+    if (!state.config.autoRunBoundRunners || control.stopRequested) {
+      return { started: 0, completed: 0, failed: 0, resultCount: 0, addedCount: 0 };
+    }
+    const requests = buildAutomaticBoundRunnerRequests({
+      sourceFeatureId: FEATURE_KEY,
+      targets: state.boundRunnerTargets,
+      rows,
+      forceUpdateData: state.config.forceUpdateData
+    });
+    const summary = { started: 0, completed: 0, failed: 0, resultCount: 0, addedCount: 0 };
+
+    for (const [index, request] of requests.entries()) {
+      if (control.stopRequested) break;
+      const taskId = `${control.runId}-AUTO-${request.featureId.replace(/[^a-z0-9]+/gi, "-").toUpperCase()}-R${round}-${index + 1}`;
+      control.activeRunnerTaskIds.add(taskId);
+      summary.started += 1;
+      state.notice = {
+        tone: "info",
+        text: `正在自动运行 ${request.target.name}：处理 ${request.parameters.postUrls?.length || 0} 条本轮笔记链接…`
+      };
+      saveState(state);
+      render();
+      try {
+        const response = await sendMessage({
+          type: MESSAGE_EXECUTE_FEATURE_RUNNER,
+          options: { schemaVersion: 1, taskId, ...request }
+        });
+        if (!response || (response.ok === false && !response.status)) {
+          throw new Error(response?.error || `${request.target.name} 自动运行失败。`);
+        }
+        summary.resultCount += Number(response.resultCount) || 0;
+        summary.addedCount += Number(response.addedCount) || 0;
+        if (response.status === "failed") {
+          summary.failed += 1;
+        } else {
+          summary.completed += 1;
+        }
+      } catch (error) {
+        summary.failed += 1;
+        state.notice = {
+          tone: "warning",
+          text: `${request.target.name} 自动运行失败：${error.message || String(error)}`
+        };
+      } finally {
+        control.activeRunnerTaskIds.delete(taskId);
+      }
+    }
+    return summary;
   };
 
   const startRun = async () => {
@@ -929,7 +1140,8 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     const control = {
       runId: "XHS-" + String(Date.now()).slice(-8),
       stopRequested: false,
-      activeCaptureRunIds: new Set()
+      activeCaptureRunIds: new Set(),
+      activeRunnerTaskIds: new Set()
     };
     activeRun = control;
     activeXiaohongshuKeywordRun = control;
@@ -942,11 +1154,16 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     const taskTimeoutSeconds = await loadTaskTimeoutSeconds();
     let addedTotal = 0;
     let completedRounds = 0;
+    let autoRunnerStartedTotal = 0;
+    let autoRunnerFailedTotal = 0;
+    let autoRunnerResultTotal = 0;
+    let autoRunnerAddedTotal = 0;
     try {
       do {
         const round = completedRounds + 1;
         let roundFailed = 0;
         let roundAdded = 0;
+        const roundCapturedRows = [];
         await runConcurrentTasks(keywords, {
           concurrency: state.config.concurrency,
           shouldStop: () => control.stopRequested,
@@ -994,19 +1211,20 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
                 return;
               }
               if (!response?.ok) throw new Error(response?.error || "小红书采集失败");
+              roundCapturedRows.push(...(Array.isArray(response.data?.results) ? response.data.results : []));
               const added = mergeDataRows(state, keyword, response.data, {
                 runId: control.runId,
                 recordId: keywordRecord.record.id
               });
               roundAdded += added;
               addedTotal += added;
-              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", response.data?.results?.length || 0);
+              finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", response.data?.results?.length || 0, added);
             } catch (error) {
               if (control.stopRequested) finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
               else {
                 const errorText = error.message || String(error);
                 roundFailed += 1;
-                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, 0, errorText);
                 state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
               }
             } finally {
@@ -1020,10 +1238,25 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
         saveState(state);
         if (control.stopRequested) break;
         completedRounds = round;
+        const autoRunnerSummary = await runBoundRunners(control, roundCapturedRows, round);
+        autoRunnerStartedTotal += autoRunnerSummary.started;
+        autoRunnerFailedTotal += autoRunnerSummary.failed;
+        autoRunnerResultTotal += autoRunnerSummary.resultCount;
+        autoRunnerAddedTotal += autoRunnerSummary.addedCount;
+        if (autoRunnerSummary.started) {
+          const autoRunnerTone = autoRunnerSummary.failed ? "warning" : "success";
+          state.notice = {
+            tone: autoRunnerTone,
+            text: `第 ${round} 轮已自动运行 ${autoRunnerSummary.started} 个绑定 Runner：结果 ${autoRunnerSummary.resultCount} 条，新增 ${autoRunnerSummary.addedCount} 条${autoRunnerSummary.failed ? `，失败 ${autoRunnerSummary.failed} 个` : ""}。`
+          };
+          saveState(state);
+          render();
+        }
+        if (control.stopRequested) break;
         if (!state.config.polling) {
           state.notice = {
             tone: roundFailed ? "warning" : "success",
-            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词；${getXiaohongshuFilterSummary(state.config)}`
+            text: `运行结束：新增 ${addedTotal} 条数据，失败 ${roundFailed} 个关键词${autoRunnerStartedTotal ? `；自动 Runner ${autoRunnerStartedTotal} 个，结果 ${autoRunnerResultTotal} 条，新增 ${autoRunnerAddedTotal} 条${autoRunnerFailedTotal ? `，失败 ${autoRunnerFailedTotal} 个` : ""}` : ""}；${getXiaohongshuFilterSummary(state.config)}`
           };
           state.tab = addedTotal ? "data" : "records";
           break;
@@ -1074,6 +1307,9 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     await Promise.all([...control.activeCaptureRunIds].map((runId) => (
       sendMessage({ type: MESSAGE_STOP_XIAOHONGSHU_KEYWORD, options: { runId } }).catch(() => null)
     )));
+    await Promise.all([...control.activeRunnerTaskIds].map((taskId) => (
+      sendMessage({ type: MESSAGE_STOP_FEATURE_RUNNER, options: { taskId } }).catch(() => null)
+    )));
   };
 
   const handleLiveRunFinished = async () => {
@@ -1113,6 +1349,20 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     if (!button || button.disabled) return;
     const action = button.dataset.action;
 
+    if (await handleFeatureRunnerPanelAction(state.runnerPanel, action, {
+      disabled: state.running,
+      getParameters: () => JSON.parse(JSON.stringify(state.config)),
+      onChange: render,
+      onFinished: async () => {
+        const latest = await loadSavedState().catch(() => null);
+        state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+        state.dataRows = Array.isArray(latest?.dataRows)
+          ? applyItemLimit(latest.dataRows.map(normalizeStoredDataRow), state.dataStorageLimit)
+          : state.dataRows;
+        state.notice = latest?.notice || state.notice;
+      }
+    })) return;
+
     if (action === "run") {
       startRun().catch((error) => {
         const failedRun = activeRun;
@@ -1134,11 +1384,14 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     }
     if (action === "set-mode") {
       const nextMode = button.dataset.mode;
-      if (nextMode === "form" && state.mode === "json" && !applyJsonDraft()) {
+      if (nextMode !== "json" && state.mode === "json" && !applyJsonDraft()) {
         render();
         return;
       }
       if (nextMode === "json") syncJsonDraft();
+      if (nextMode === "runner") {
+        syncFeatureRunnerDraft(state.runnerPanel, JSON.parse(JSON.stringify(state.config)), { force: true });
+      }
       state.mode = nextMode;
       render();
       return;
@@ -1208,6 +1461,11 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       render();
       return;
     }
+    if (action === "toggle-page-parameters") {
+      state.pageParametersOpen = !state.pageParametersOpen;
+      render();
+      return;
+    }
     if (action === "toggle-data-filters") {
       state.dataFiltersOpen = !state.dataFiltersOpen;
       render();
@@ -1218,6 +1476,17 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       render();
       return;
     }
+    if (action === "toggle-data-columns") {
+      state.dataColumnsOpen = !state.dataColumnsOpen;
+      scheduleDataColumnRender(render);
+      return;
+    }
+    if (action === "show-all-data-columns") {
+      state.dataColumnVisibility = showAllDataColumns(DATA_COLUMNS);
+      saveState(state);
+      scheduleDataColumnRender(render);
+      return;
+    }
     if (action === "apply-json") {
       applyJsonDraft();
       render();
@@ -1225,7 +1494,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     }
     if (action === "clear-records") {
       state.records = [];
-      state.recordFilters = { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER };
+      state.recordFilters = { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER, executionType: ALL_RECORD_FILTER };
       state.taskDetailRecordId = "";
       saveState(state);
       render();
@@ -1234,7 +1503,9 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     if (action === "copy-json") {
       const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
       try {
-        openRowsJsonPreview(rows, buildXiaohongshuKeywordExportRows);
+        openRowsJsonPreview(rows, (currentRows) => projectDataRowsByColumns(
+          buildXiaohongshuKeywordExportRows(currentRows), DATA_COLUMNS, state.dataColumnVisibility
+        ));
       } catch (error) {
         state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
         render();
@@ -1243,7 +1514,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     }
     if (action === "export-csv") {
       const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
-      downloadXiaohongshuKeywordData(rows, "csv");
+      downloadDataRowsCsv(buildXiaohongshuKeywordExportRows(rows), DATA_COLUMNS, state.dataColumnVisibility, "xiaohongshu-keyword-data");
       state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
       render();
       return;
@@ -1259,6 +1530,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       state.config = cloneSampleConfig();
       state.inputListPage = 1;
       state.optionsOpen = false;
+      state.pageParametersOpen = false;
       state.notice = { tone: "success", text: "已还原示例输入。" };
       syncJsonDraft();
       saveState(state);
@@ -1267,6 +1539,10 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   };
 
   const handleInput = (event) => {
+    if (event.target.matches("[data-runner-json-input]")) {
+      updateFeatureRunnerDraft(state.runnerPanel, event.target.value);
+      return;
+    }
     const dataFilter = event.target.dataset.dataFilter;
     if (dataFilter && event.target.tagName === "INPUT") {
       const selectionStart = event.target.selectionStart;
@@ -1301,6 +1577,14 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   };
 
   const handleChange = (event) => {
+    const dataColumn = event.target.dataset.dataColumn;
+    if (dataColumn) {
+      state.dataColumnVisibility[dataColumn] = event.target.checked;
+      state.dataColumnVisibility = createDataColumnVisibility(DATA_COLUMNS, state.dataColumnVisibility);
+      saveState(state);
+      scheduleDataColumnRender(render);
+      return;
+    }
     const dataFilter = event.target.dataset.dataFilter;
     if (dataFilter) {
       state.dataFilters[dataFilter] = event.target.value;
@@ -1327,6 +1611,11 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
       syncJsonDraft();
     }
     if (field === "concurrency") state.config.concurrency = normalizeTaskConcurrency(state.config.concurrency);
+    if (field === "forceUpdateData") state.config.forceUpdateData = event.target.checked;
+    if (field === "autoRunBoundRunners") {
+      state.config.autoRunBoundRunners = event.target.checked;
+      syncJsonDraft();
+    }
     if (field === "polling") {
       state.config.polling = event.target.checked;
       render();
@@ -1342,6 +1631,18 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
   };
 
   syncJsonDraft();
+  syncFeatureRunnerDraft(state.runnerPanel, JSON.parse(JSON.stringify(state.config)));
+  const unsubscribeRunner = subscribeFeatureRunnerPanel(state.runnerPanel, render, async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+    state.dataRows = Array.isArray(latest?.dataRows)
+      ? applyItemLimit(latest.dataRows.map(normalizeStoredDataRow), state.dataStorageLimit)
+      : state.dataRows;
+    state.notice = latest?.notice || state.notice;
+  }, async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+  });
   container.addEventListener("click", handleClick);
   container.addEventListener("input", handleInput);
   container.addEventListener("change", handleChange);
@@ -1357,6 +1658,7 @@ export async function mountXiaohongshuKeywordMonitor(container, context) {
     container.removeEventListener("change", handleChange);
     document.removeEventListener("keydown", handleKeydown);
     globalThis.removeEventListener?.(XIAOHONGSHU_KEYWORD_RUN_FINISHED_EVENT, handleLiveRunFinished);
+    unsubscribeRunner();
     container.replaceChildren();
   };
 }

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>列设置设计对比</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 28px; background: #eef1f6; color: #172033; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    h1 { margin: 0 0 22px; font-size: 20px; }
+    .comparison { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 24px; align-items: start; }
+    figure { margin: 0; padding: 16px; border: 1px solid #dfe5ee; border-radius: 12px; background: #fff; }
+    figcaption { margin-bottom: 12px; color: #667085; font-size: 12px; font-weight: 700; }
+    .reference { display: block; width: 130px; height: 363px; margin: auto; image-rendering: auto; }
+    .implementation { display: block; width: 100%; height: auto; border: 1px solid #eef1f5; border-radius: 8px; }
+    .notes { margin-top: 18px; padding: 14px 16px; border-radius: 10px; background: #fff; font-size: 13px; line-height: 1.7; }
+  </style>
+</head>
+<body>
+  <h1>列设置：参考与实现</h1>
+  <main class="comparison">
+    <figure>
+      <figcaption>参考：紧凑按钮 + 字段浮层</figcaption>
+      <img class="reference" src="column-settings-reference.png" alt="参考列设置菜单">
+    </figure>
+    <figure>
+      <figcaption>实现：功能标题右侧按钮 + 可滚动字段浮层</figcaption>
+      <img class="implementation" src="column-settings-compact.png" alt="BrowserCoreClaw 列设置实现">
+    </figure>
+  </main>
+  <p class="notes">保留参考图的紧凑结构和勾选交互，并适配现有 BrowserCoreClaw 的蓝色控件、圆角和信息层级。字段较多时仅浮层内部滚动。</p>
+</body>
+</html>

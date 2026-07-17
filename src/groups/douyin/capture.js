@@ -6,6 +6,7 @@ const READY_TIMEOUT_MS = 30000;
 const SETTLE_MIN_MS = 900;
 const SETTLE_POLLS = 3;
 const activeCaptures = new Map();
+const POST_NOT_FOUND_CODE = "DOUYIN_POST_NOT_FOUND";
 
 function callChrome(callbackApi) {
   return new Promise((resolve, reject) => callbackApi((result) => {
@@ -34,6 +35,20 @@ export function isDouyinPostUrl(value) {
     return isDouyinHost
       && (/^\/video\/\d+\/?$/i.test(url.pathname) || (/^\/user\/[^/]+\/?$/i.test(url.pathname) && /^\d+$/.test(url.searchParams.get("modal_id") || "")) || isShortLink);
   } catch { return false; }
+}
+
+export function getDouyinPostId(value) {
+  try {
+    const url = new URL(value);
+    return url.pathname.match(/^\/video\/(\d+)\/?$/i)?.[1]
+      || (/^\/user\/[^/]+\/?$/i.test(url.pathname) ? url.searchParams.get("modal_id") || "" : "");
+  } catch { return ""; }
+}
+
+function postNotFoundError(targetUrl) {
+  const error = new Error(`抖音作品链接不存在或已不可访问：${targetUrl}`);
+  error.code = POST_NOT_FOUND_CODE;
+  return error;
 }
 
 async function getDouyinTab(preferredTabId = null, isolated = false) {
@@ -65,7 +80,7 @@ function pageCommand(tabId, command, options = {}) {
   return executeTabFunction(tabId, runDouyinPageCommand, [command, options]);
 }
 
-async function waitForStablePage(tabId, operation, session) {
+async function waitForStablePage(tabId, operation, session, { expectedVideoId = "", targetUrl = "" } = {}) {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   let signature = "";
   let stableSince = 0;
@@ -77,8 +92,9 @@ async function waitForStablePage(tabId, operation, session) {
   while (Date.now() < deadline) {
     throwIfStopped(session);
     try {
-      lastState = await pageCommand(tabId, inspectCommand);
+      lastState = await pageCommand(tabId, inspectCommand, { expectedVideoId });
       throwIfStopped(session);
+      if (operation === "post-detail" && lastState?.unavailable) throw postNotFoundError(targetUrl);
       if (lastState?.captcha) throw new Error("抖音页面需要安全验证，请在标签页完成验证后再次运行。");
       const ready = operation === "post-detail"
         ? lastState?.hasDetail && lastState?.readyState === "complete"
@@ -92,7 +108,7 @@ async function waitForStablePage(tabId, operation, session) {
       if (ready && stablePolls >= SETTLE_POLLS && Date.now() - stableSince >= SETTLE_MIN_MS) return lastState;
     } catch (error) {
       if (session.stopped || error.code === stoppedError(operation).code) throw stoppedError(operation);
-      if (/安全验证/.test(error.message)) throw error;
+      if (/安全验证/.test(error.message) || error.code === POST_NOT_FOUND_CODE) throw error;
       lastState = { error: error.message || String(error) };
       signature = ""; stableSince = 0; stablePolls = 0;
     }
@@ -135,6 +151,7 @@ async function collectPosts(tabId, limit, session) {
 export async function captureDouyin(operation, options) {
   const targetKey = operation === "post-detail" ? "postUrl" : "profileUrl";
   const targetUrl = String(options[targetKey] || "").trim();
+  const expectedVideoId = operation === "post-detail" ? getDouyinPostId(targetUrl) : "";
   const runId = String(options.runId || "").trim();
   const valid = operation === "post-detail" ? isDouyinPostUrl(targetUrl) : isDouyinProfileUrl(targetUrl);
   if (!valid) throw new Error(operation === "post-detail"
@@ -150,22 +167,29 @@ export async function captureDouyin(operation, options) {
   const session = { runId, operation, tabId: tab.id, stopped: false };
   activeCaptures.set(`${operation}:${runId}`, session);
   let completed = false;
+  let unavailable = false;
   try {
     if (!options.isolated) await callChrome((done) => chrome.tabs.update(tab.id, { active: true }, done));
     throwIfStopped(session);
     await navigateTab(tab.id, targetUrl);
-    await waitForStablePage(tab.id, operation, session);
+    await waitForStablePage(tab.id, operation, session, { expectedVideoId, targetUrl });
     throwIfStopped(session);
     const data = operation === "profile-posts"
       ? await collectPosts(tab.id, options.limit, session)
-      : await pageCommand(tab.id, operation === "profile-info" ? "extract-profile" : "extract-detail");
-    const validData = operation === "profile-posts" ? Array.isArray(data?.posts) : operation === "profile-info" ? Boolean(data?.profile?.profileId || data?.profile?.nickname) : Boolean(data?.detail?.videoId || data?.detail?.text);
+      : await pageCommand(tab.id, operation === "profile-info" ? "extract-profile" : "extract-detail", { expectedVideoId });
+    if (operation === "post-detail" && expectedVideoId && String(data?.detail?.videoId || "") !== expectedVideoId) {
+      throw postNotFoundError(targetUrl);
+    }
+    const validData = operation === "profile-posts" ? Array.isArray(data?.posts) : operation === "profile-info" ? Boolean(data?.profile?.profileId || data?.profile?.nickname) : Boolean(data?.detail?.videoId && data?.detail?.text);
     if (!validData) throw new Error(`未读取到抖音${operation === "profile-info" ? "博主资料" : operation === "profile-posts" ? "作品" : "作品详情"}，请确认链接可公开访问。`);
     completed = true;
     return { ok: true, tabId: tab.id, data };
+  } catch (error) {
+    unavailable = error?.code === POST_NOT_FOUND_CODE;
+    throw error;
   } finally {
     if (activeCaptures.get(`${operation}:${runId}`) === session) activeCaptures.delete(`${operation}:${runId}`);
-    if (ownsTargetTab && (completed || session.stopped)) await closePluginCreatedTab(tab.id);
+    if (ownsTargetTab && (completed || session.stopped || unavailable)) await closePluginCreatedTab(tab.id);
   }
 }
 

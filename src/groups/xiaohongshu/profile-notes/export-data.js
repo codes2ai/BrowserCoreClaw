@@ -1,10 +1,12 @@
+import { normalizeXiaohongshuLikes } from "../likes-normalizer.js";
+
 export function buildXiaohongshuProfileExportRows(dataRows) {
   return (Array.isArray(dataRows) ? dataRows : []).map((row) => ({
     pageOrder: row.pageOrder || "",
     noteId: row.noteId || "",
     noteTitle: row.noteTitle || "",
     noteAuthor: row.noteAuthor || "",
-    noteLikes: row.noteLikes || "",
+    noteLikes: normalizeXiaohongshuLikes(row.noteLikes ?? row.likes),
     noteCover: row.noteCover || "",
     noteUrl: row.noteUrl || "",
     collectedAt: row.capturedAt || ""

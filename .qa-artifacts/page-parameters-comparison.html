@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>页面参数视觉对照</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 24px; background: #f3f6f3; color: #17211d; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      h1 { margin: 0 0 18px; font-size: 20px; }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+      figure { margin: 0; overflow: hidden; border: 1px solid #d9e0d9; border-radius: 12px; background: #fff; }
+      figcaption { padding: 10px 12px; border-bottom: 1px solid #e8ece8; font-weight: 700; }
+      img { display: block; width: 100%; height: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>页面参数：参考与实现状态</h1>
+    <div class="grid">
+      <figure><figcaption>用户参考：页面参数应独立于运行选项</figcaption><img src="page-parameters-reference.png" alt="用户提供的页面参数参考图"></figure>
+      <figure><figcaption>实现：Google 新闻监控的页面参数</figcaption><img src="page-parameters-google-detail.png" alt="Google 页面参数实现图"></figure>
+      <figure><figcaption>实现：无配置功能的占位状态</figcaption><img src="page-parameters-placeholder-detail.png" alt="空页面参数占位实现图"></figure>
+    </div>
+  </body>
+</html>

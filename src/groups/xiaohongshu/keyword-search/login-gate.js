@@ -37,11 +37,11 @@ function waitForNextPaint() {
   });
 }
 
-function renderProgress(state) {
+function renderProgress(state, featureName) {
   const stages = [
     ["preparing", "准备检测", "正在建立小红书检测连接"],
     ["checking", "读取登录状态", "正在确认当前 Chrome Profile"],
-    ["ready", "进入功能", "登录确认后加载关键词搜索" ]
+    ["ready", "进入功能", `登录确认后加载${featureName}`]
   ];
   const stageIndex = stages.findIndex(([id]) => id === state.step);
   const activeIndex = stageIndex >= 0 ? stageIndex : state.phase === "logged_out" || state.phase === "error" ? 1 : 0;
@@ -88,11 +88,11 @@ function gateTemplate(state, context) {
         <div class="xhs-login-icon" aria-hidden="true">小红书</div>
         <h2>${isLoggedOut ? "请先登录小红书" : "正在确认小红书登录状态"}</h2>
         <p>${escapeHtml(state.message)}</p>
-        ${renderProgress(state)}
+        ${renderProgress(state, featureName)}
         <ol class="xhs-login-steps">
           <li>在当前 Chrome Profile 的小红书标签页完成登录。</li>
           <li>回到扩展，点击“重新检测”。</li>
-          <li>仅检测到登录成功后，才会显示搜索与运行参数。</li>
+          <li>仅检测到登录成功后，才会显示对应功能与运行参数。</li>
         </ol>
         <div class="xhs-login-actions">
           <button class="xhs-primary-button" type="button" data-login-action="open" ${isChecking || isUnavailable ? "disabled" : ""}>
@@ -114,6 +114,7 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
   let monitorCleanup = null;
   let requestId = 0;
   const mountMonitor = options.mountMonitor || mountXiaohongshuKeywordMonitor;
+  const featureName = context?.feature?.name || "关键词搜索";
   const state = {
     phase: isExtensionRuntime() ? "checking" : "unavailable",
     step: isExtensionRuntime() ? "preparing" : "",
@@ -155,7 +156,7 @@ export function mountXiaohongshuLoginGate(container, context, options = {}) {
       }
       if (response.loggedIn) {
         state.step = "ready";
-        state.message = "已确认登录状态，正在进入关键词搜索功能…";
+        state.message = `已确认登录状态，正在进入${featureName}…`;
         render();
         await waitForNextPaint();
         await enterFeature();

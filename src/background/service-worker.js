@@ -29,11 +29,23 @@ import {
   MESSAGE_STOP_XIAOHONGSHU_PROFILE_INFO
 } from "../groups/xiaohongshu/profile-info/constants.js";
 import {
+  captureXiaohongshuPostDetail,
+  stopXiaohongshuPostDetailCapture
+} from "../groups/xiaohongshu/post-detail/background.js";
+import {
+  MESSAGE_CAPTURE_XIAOHONGSHU_POST_DETAIL,
+  MESSAGE_STOP_XIAOHONGSHU_POST_DETAIL
+} from "../groups/xiaohongshu/post-detail/constants.js";
+import {
+  checkWeiboProfilePostsLogin,
   captureWeiboProfilePosts,
+  openWeiboProfilePostsLogin,
   stopWeiboProfilePostsCapture
 } from "../groups/weibo/profile-posts/background.js";
 import {
+  MESSAGE_CHECK_WEIBO_PROFILE_POSTS_LOGIN,
   MESSAGE_CAPTURE_WEIBO_PROFILE_POSTS,
+  MESSAGE_OPEN_WEIBO_PROFILE_POSTS_LOGIN,
   MESSAGE_STOP_WEIBO_PROFILE_POSTS
 } from "../groups/weibo/profile-posts/constants.js";
 import {
@@ -76,6 +88,20 @@ import {
   MESSAGE_CAPTURE_DOUYIN_POST_DETAIL,
   MESSAGE_STOP_DOUYIN_POST_DETAIL
 } from "../groups/douyin/post-detail/constants.js";
+import {
+  executeFeatureRunner,
+  getFeatureRunnerTask,
+  listRegisteredFeatureRunners,
+  stopFeatureRunner,
+  validateFeatureRunnerRequest
+} from "./runner-controller.js";
+import {
+  MESSAGE_EXECUTE_FEATURE_RUNNER,
+  MESSAGE_GET_FEATURE_RUNNER_TASK,
+  MESSAGE_LIST_FEATURE_RUNNERS,
+  MESSAGE_STOP_FEATURE_RUNNER,
+  MESSAGE_VALIDATE_FEATURE_RUNNER
+} from "./runner-messages.js";
 
 const DASHBOARD_PATH = "sidepanel.html";
 let dashboardOpenPromise = null;
@@ -144,7 +170,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     [MESSAGE_STOP_XIAOHONGSHU_PROFILE]: stopXiaohongshuProfileCapture,
     [MESSAGE_CAPTURE_XIAOHONGSHU_PROFILE_INFO]: captureXiaohongshuProfileInfo,
     [MESSAGE_STOP_XIAOHONGSHU_PROFILE_INFO]: stopXiaohongshuProfileInfoCapture,
+    [MESSAGE_CAPTURE_XIAOHONGSHU_POST_DETAIL]: captureXiaohongshuPostDetail,
+    [MESSAGE_STOP_XIAOHONGSHU_POST_DETAIL]: stopXiaohongshuPostDetailCapture,
     [MESSAGE_CAPTURE_WEIBO_PROFILE_POSTS]: captureWeiboProfilePosts,
+    [MESSAGE_CHECK_WEIBO_PROFILE_POSTS_LOGIN]: checkWeiboProfilePostsLogin,
+    [MESSAGE_OPEN_WEIBO_PROFILE_POSTS_LOGIN]: openWeiboProfilePostsLogin,
     [MESSAGE_STOP_WEIBO_PROFILE_POSTS]: stopWeiboProfilePostsCapture,
     [MESSAGE_CAPTURE_WEIBO_PROFILE_INFO]: captureWeiboProfileInfo,
     [MESSAGE_STOP_WEIBO_PROFILE_INFO]: stopWeiboProfileInfoCapture,
@@ -155,14 +185,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     [MESSAGE_CAPTURE_DOUYIN_PROFILE_INFO]: captureDouyinProfileInfo,
     [MESSAGE_STOP_DOUYIN_PROFILE_INFO]: stopDouyinProfileInfoCapture,
     [MESSAGE_CAPTURE_DOUYIN_POST_DETAIL]: captureDouyinPostDetail,
-    [MESSAGE_STOP_DOUYIN_POST_DETAIL]: stopDouyinPostDetailCapture
+    [MESSAGE_STOP_DOUYIN_POST_DETAIL]: stopDouyinPostDetailCapture,
+    [MESSAGE_LIST_FEATURE_RUNNERS]: listRegisteredFeatureRunners,
+    [MESSAGE_VALIDATE_FEATURE_RUNNER]: validateFeatureRunnerRequest,
+    [MESSAGE_EXECUTE_FEATURE_RUNNER]: executeFeatureRunner,
+    [MESSAGE_STOP_FEATURE_RUNNER]: stopFeatureRunner,
+    [MESSAGE_GET_FEATURE_RUNNER_TASK]: getFeatureRunnerTask
   };
   const handler = handlers[message?.type];
   if (!handler) {
     return false;
   }
 
-  handler(message.options || {})
+  Promise.resolve()
+    .then(() => handler(message.options || {}))
     .then(sendResponse)
     .catch((error) => {
       sendResponse({

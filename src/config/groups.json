@@ -18,6 +18,7 @@
           "name": "Google 新闻监控",
           "description": "按关键词持续采集 Google 新闻结果，支持循环监控、增量去重和数据导出。",
           "status": "beta",
+          "runner": "src/groups/google/google-news/runner.js",
           "entry": "src/groups/google/google-news/index.js",
           "style": "src/groups/google/google-news/styles.css"
         }
@@ -33,8 +34,9 @@
         {
           "id": "profile-posts",
           "name": "微博博主博文采集",
-          "description": "按微博博主主页链接采集公开博文、媒体资源和互动数据。",
+          "description": "登录微博后，按博主主页链接采集公开博文、媒体资源和互动数据。",
           "status": "beta",
+          "runner": "src/groups/weibo/profile-posts/runner.js",
           "entry": "src/groups/weibo/profile-posts/index.js",
           "style": "src/groups/weibo/profile-posts/styles.css"
         },
@@ -43,6 +45,7 @@
           "name": "微博博主信息采集",
           "description": "按微博博主主页链接采集公开资料和互动统计，无需登录前置检查。",
           "status": "beta",
+          "runner": "src/groups/weibo/profile-info/runner.js",
           "entry": "src/groups/weibo/profile-info/index.js",
           "style": "src/groups/weibo/profile-info/styles.css"
         },
@@ -51,6 +54,7 @@
           "name": "微博正文采集",
           "description": "按微博正文链接批量采集作者、正文、媒体、话题、提及和互动详情。",
           "status": "beta",
+          "runner": "src/groups/weibo/post-detail/runner.js",
           "entry": "src/groups/weibo/post-detail/index.js",
           "style": "src/groups/weibo/post-detail/styles.css"
         }
@@ -68,6 +72,7 @@
           "name": "抖音博主博文采集",
           "description": "按抖音博主主页链接采集公开作品、封面和互动数据。",
           "status": "beta",
+          "runner": "src/groups/douyin/profile-posts/runner.js",
           "entry": "src/groups/douyin/profile-posts/index.js",
           "style": "src/groups/douyin/profile-posts/styles.css"
         },
@@ -76,6 +81,7 @@
           "name": "抖音博主信息采集",
           "description": "按抖音博主主页链接采集公开资料和互动统计，不进行登录状态检测。",
           "status": "beta",
+          "runner": "src/groups/douyin/profile-info/runner.js",
           "entry": "src/groups/douyin/profile-info/index.js",
           "style": "src/groups/douyin/profile-info/styles.css"
         },
@@ -84,6 +90,7 @@
           "name": "抖音博文采集",
           "description": "按抖音作品链接批量采集作者、描述、话题、媒体和互动详情。",
           "status": "beta",
+          "runner": "src/groups/douyin/post-detail/runner.js",
           "entry": "src/groups/douyin/post-detail/index.js",
           "style": "src/groups/douyin/post-detail/styles.css"
         }
@@ -92,7 +99,7 @@
     {
       "id": "xiaohongshu",
       "name": "小红书",
-      "description": "采集小红书搜索、用户主页和公开笔记数据。",
+      "description": "采集小红书搜索、用户主页、笔记正文和相关公开数据。",
       "icon": "XHS",
       "image": "assets/images/xiaohongshu.svg",
       "features": [
@@ -101,6 +108,7 @@
           "name": "关键词搜索",
           "description": "按关键词搜索小红书笔记，支持页面筛选、滚动采集、记录、数据与导出。",
           "status": "beta",
+          "runner": "src/groups/xiaohongshu/keyword-search/runner.js",
           "entry": "src/groups/xiaohongshu/keyword-search/index.js",
           "style": "src/groups/xiaohongshu/keyword-search/styles.css"
         },
@@ -109,6 +117,7 @@
           "name": "小红书博主博文采集",
           "description": "按小红书博主主页链接采集主页博文、运行记录与可导出数据。",
           "status": "beta",
+          "runner": "src/groups/xiaohongshu/profile-notes/runner.js",
           "entry": "src/groups/xiaohongshu/profile-notes/index.js",
           "style": "src/groups/xiaohongshu/profile-notes/styles.css"
         },
@@ -117,8 +126,18 @@
           "name": "小红书博主信息采集",
           "description": "按小红书博主主页链接采集公开资料、互动统计、运行记录与可导出数据。",
           "status": "beta",
+          "runner": "src/groups/xiaohongshu/profile-info/runner.js",
           "entry": "src/groups/xiaohongshu/profile-info/index.js",
           "style": "src/groups/xiaohongshu/profile-info/styles.css"
+        },
+        {
+          "id": "post-detail",
+          "name": "小红书正文采集",
+          "description": "按小红书笔记正文链接批量采集标题、描述、作者、媒体和互动详情。",
+          "status": "beta",
+          "runner": "src/groups/xiaohongshu/post-detail/runner.js",
+          "entry": "src/groups/xiaohongshu/post-detail/index.js",
+          "style": "src/groups/xiaohongshu/post-detail/styles.css"
         }
       ]
     }

@@ -47,6 +47,25 @@ export const mountDouyinPostDetailMonitor = createWeiboProfileMonitor({
     { key: "postUrl", label: "作品链接" },
     { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
   ],
+  dataColumns: [
+    { key: "videoId", label: "作品 ID" },
+    { key: "author", label: "作者" },
+    { key: "authorUrl", label: "作者主页", type: "link" },
+    { key: "authorAvatar", label: "作者头像", type: "image" },
+    { key: "text", label: "作品描述", type: "long" },
+    { key: "publishedAt", label: "发布时间" },
+    { key: "likes", label: "点赞" },
+    { key: "comments", label: "评论" },
+    { key: "favorites", label: "收藏" },
+    { key: "shares", label: "分享" },
+    { key: "topics", label: "话题", type: "long" },
+    { key: "contentLinks", label: "关联链接", type: "long" },
+    { key: "cover", label: "封面", type: "image" },
+    { key: "mediaUrls", label: "媒体链接", type: "long" },
+    { key: "detailRawText", label: "详情原文", type: "long" },
+    { key: "postUrl", label: "作品链接", type: "link" },
+    { key: "collectedAt", label: "采集时间" }
+  ],
   toRows(data, postUrl) {
     const detail = data?.detail || {};
     const id = String(detail.videoId || detail.postUrl || postUrl || "").trim();

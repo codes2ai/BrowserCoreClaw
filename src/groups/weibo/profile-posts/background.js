@@ -9,6 +9,31 @@ import { runWeiboPageCommand } from "../page-extract.js";
 
 const WEIBO_URL_PATTERNS = ["https://weibo.com/*", "https://www.weibo.com/*"];
 const activeCaptures = new Map();
+let managedLoginTabId = null;
+
+function readWeiboLoginState() {
+  const text = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const isVisible = (element) => {
+    if (!element) return false;
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== "none" && style.visibility !== "hidden"
+      && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+  };
+  const controls = [...document.querySelectorAll("a, button, [role='button']")]
+    .filter(isVisible)
+    .map((element) => text(element.innerText || element.getAttribute("aria-label") || element.getAttribute("title")))
+    .filter(Boolean);
+  const pageText = text(document.body?.innerText);
+  return {
+    href: location.href,
+    readyState: document.readyState,
+    hasLoginEntry: controls.some((label) => /^(?:登录|注册|登录\/注册|立即登录|账号登录)$/.test(label))
+      || Boolean(document.querySelector('input[type="password"], input[name="username"], input[autocomplete="username"]')),
+    isVerificationPage: /安全验证|验证码|访问频繁|操作频繁|请完成验证/.test(pageText),
+    hasEnoughContent: pageText.length > 80
+  };
+}
 
 function callChrome(callbackApi) {
   return new Promise((resolve, reject) => {
@@ -23,6 +48,110 @@ function callChrome(callbackApi) {
 async function closePluginCreatedTab(tabId) {
   if (!Number.isInteger(tabId)) return;
   await callChrome((done) => chrome.tabs.remove(tabId, done)).catch(() => {});
+}
+
+function isWeiboLoginPageUrl(value) {
+  try {
+    const url = new URL(value);
+    return /(^|\.)weibo\.com$/i.test(url.hostname)
+      || /(^|\.)passport\.weibo\.com$/i.test(url.hostname)
+      || /(^|\.)login\.sina\.com\.cn$/i.test(url.hostname);
+  } catch { return false; }
+}
+
+async function getManagedLoginTab(active = true) {
+  if (Number.isInteger(managedLoginTabId)) {
+    try {
+      const existing = await callChrome((done) => chrome.tabs.get(managedLoginTabId, done));
+      if (existing?.url && isWeiboLoginPageUrl(existing.url)) {
+        return callChrome((done) => chrome.tabs.update(existing.id, { active }, done));
+      }
+    } catch {
+      // The user may have closed the dedicated login page.
+    }
+  }
+  const tab = await callChrome((done) => chrome.tabs.create({ url: WEIBO_HOME_URL, active }, done));
+  managedLoginTabId = Number.isInteger(tab?.id) ? tab.id : null;
+  return tab;
+}
+
+async function closeManagedLoginTab() {
+  const tabId = managedLoginTabId;
+  managedLoginTabId = null;
+  await closePluginCreatedTab(tabId);
+}
+
+async function inspectWeiboLoginState(tabId) {
+  const deadline = Date.now() + WEIBO_PROFILE_READY_TIMEOUT_MS;
+  let lastError = null;
+  let loggedInPolls = 0;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await callChrome((done) => chrome.tabs.get(tabId, done));
+      const currentUrl = String(tab?.url || tab?.pendingUrl || "");
+      let currentHost = "";
+      try { currentHost = new URL(currentUrl).hostname; } catch { /* keep waiting for a navigable URL */ }
+      if (/(^|\.)passport\.weibo\.com$|(^|\.)login\.sina\.com\.cn$/i.test(currentHost)) {
+        return { state: "logged_out", reason: "当前 Chrome Profile 尚未登录微博。" };
+      }
+      if (/(^https:\/\/)([^/]+\.)?weibo\.com\//i.test(currentUrl)) {
+        const pageState = await executeTabFunction(tabId, readWeiboLoginState);
+        if (pageState?.readyState === "complete" && (pageState.hasEnoughContent || pageState.hasLoginEntry)) {
+          if (pageState.isVerificationPage) {
+            return { state: "unknown", reason: "微博页面需要安全验证，请在登录页完成后重新检测。" };
+          }
+          if (pageState.hasLoginEntry) {
+            return { state: "logged_out", reason: "当前 Chrome Profile 尚未登录微博。" };
+          }
+          loggedInPolls += 1;
+          if (loggedInPolls >= 3) {
+            return { state: "logged_in", reason: "已确认当前 Chrome Profile 的微博登录状态。" };
+          }
+        }
+      }
+    } catch (error) {
+      lastError = error;
+      loggedInPolls = 0;
+    }
+    await sleep(500);
+  }
+  return {
+    state: "unknown",
+    reason: `微博页面加载超时${lastError ? `：${lastError.message}` : ""}`
+  };
+}
+
+export async function checkWeiboProfilePostsLogin() {
+  // 每次检测使用独立临时页，避免占用正在运行的微博采集任务标签页。
+  const tab = await callChrome((done) => chrome.tabs.create({
+    url: WEIBO_HOME_URL,
+    active: false
+  }, done));
+  if (!Number.isInteger(tab?.id)) throw new Error("无法打开用于检测的微博标签页。");
+  try {
+    const login = await inspectWeiboLoginState(tab.id);
+    if (login.state === "logged_in") await closeManagedLoginTab();
+    return {
+      ok: true,
+      tabId: tab.id,
+      opened: true,
+      autoClosed: true,
+      loggedIn: login.state === "logged_in",
+      state: login.state,
+      reason: login.reason
+    };
+  } finally {
+    await closePluginCreatedTab(tab.id);
+  }
+}
+
+export async function openWeiboProfilePostsLogin() {
+  const tab = await getManagedLoginTab(true);
+  if (!Number.isInteger(tab?.id)) throw new Error("无法打开微博登录页面。");
+  if (Number.isInteger(tab.windowId)) {
+    await callChrome((done) => chrome.windows.update(tab.windowId, { focused: true }, done));
+  }
+  return { ok: true, tabId: tab.id };
 }
 
 function isWeiboProfileUrl(value) {
@@ -109,6 +238,18 @@ function postKey(post) {
   return String(post?.postId || post?.url || "").trim();
 }
 
+function randomScrollPause() {
+  return Math.floor(2200 + Math.random() * 2301);
+}
+
+async function waitForScrollPause(session, milliseconds) {
+  const deadline = Date.now() + milliseconds;
+  while (Date.now() < deadline) {
+    throwIfStopped(session);
+    await sleep(Math.min(180, Math.max(1, deadline - Date.now())));
+  }
+}
+
 async function collectPosts(tabId, limit, session) {
   const maximum = Math.max(1, Math.min(100, Number(limit) || 20));
   const posts = new Map();
@@ -133,8 +274,9 @@ async function collectPosts(tabId, limit, session) {
     unchangedRounds = signature === previousSignature ? unchangedRounds + 1 : 0;
     previousSignature = signature;
     if (unchangedRounds >= 3) break;
-    await pageCommand(tabId, "scroll");
-    await sleep(1100);
+    const scrollState = await pageCommand(tabId, "scroll", { minimumRatio: 0.55, maximumRatio: 0.9 });
+    await waitForScrollPause(session, randomScrollPause());
+    if (scrollState?.reachedEnd && unchangedRounds >= 1) break;
   }
   return { posts: [...posts.values()].slice(0, maximum), capturedAt, pageUrl };
 }

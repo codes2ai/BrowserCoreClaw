@@ -1,6 +1,7 @@
 import { MESSAGE_CAPTURE_WEIBO_POST_DETAIL, MESSAGE_STOP_WEIBO_POST_DETAIL } from "./constants.js";
 import { buildWeiboPostDetailExportRows, downloadWeiboPostDetailData } from "./export-data.js";
 import { createWeiboProfileMonitor } from "../profile-monitor.js";
+import { normalizeWeiboPublishedAt } from "../date-normalizer.js";
 
 function isWeiboPostUrl(value) {
   try {
@@ -12,6 +13,7 @@ function isWeiboPostUrl(value) {
 export const mountWeiboPostDetailMonitor = createWeiboProfileMonitor({
   kind: "post-detail",
   storageKey: "browserCoreClawWeiboPostDetailV1",
+  defaultUrls: ["https://weibo.com/2656274875/R8TUWtvwU"],
   captureMessage: MESSAGE_CAPTURE_WEIBO_POST_DETAIL,
   stopMessage: MESSAGE_STOP_WEIBO_POST_DETAIL,
   targetOptionKey: "postUrl",
@@ -51,6 +53,31 @@ export const mountWeiboPostDetailMonitor = createWeiboProfileMonitor({
     { key: "postUrl", label: "正文链接" },
     { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
   ],
+  dataColumns: [
+    { key: "postId", label: "博文 ID" },
+    { key: "visibility", label: "可见范围" },
+    { key: "author", label: "作者" },
+    { key: "authorUrl", label: "作者主页", type: "link" },
+    { key: "authorAvatar", label: "作者头像", type: "image" },
+    { key: "text", label: "正文", type: "long" },
+    { key: "publishedAt", label: "发布时间" },
+    { key: "source", label: "来源" },
+    { key: "reposts", label: "转发" },
+    { key: "comments", label: "评论" },
+    { key: "likes", label: "点赞" },
+    { key: "topics", label: "话题", type: "long" },
+    { key: "mentions", label: "提及", type: "long" },
+    { key: "contentLinks", label: "关联链接", type: "long" },
+    { key: "mediaUrls", label: "媒体链接", type: "long" },
+    { key: "postUrl", label: "正文链接", type: "link" },
+    { key: "collectedAt", label: "采集时间" }
+  ],
+  normalizeDataRow(row) {
+    return {
+      ...row,
+      publishedAt: normalizeWeiboPublishedAt(row?.publishedAt, { referenceDate: row?.capturedAt })
+    };
+  },
   toRows(data, postUrl) {
     const detail = data?.detail || {};
     const id = String(detail.postId || detail.postUrl || postUrl || "").trim();

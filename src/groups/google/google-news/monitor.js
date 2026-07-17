@@ -3,7 +3,7 @@ import {
   MESSAGE_GOOGLE_NEWS_CAPTURE_STATUS,
   MESSAGE_STOP_GOOGLE_NEWS
 } from "./constants.js";
-import { buildGoogleNewsExportRows, downloadGoogleNewsData } from "./export-data.js";
+import { buildGoogleNewsExportRows } from "./export-data.js";
 import { buildGoogleNewsSearchUrl } from "./search-url.js";
 import {
   getTaskRecordDetails,
@@ -11,6 +11,11 @@ import {
   renderTaskDetailModal,
   tagTaskDataRow
 } from "../../../shared/task-detail.js";
+import {
+  getTaskExecutionTypeLabel,
+  normalizeTaskExecutionType,
+  TASK_EXECUTION_TYPE_MANUAL
+} from "../../../shared/task-record-type.js";
 import {
   DEFAULT_TASK_CONCURRENCY,
   MAX_TASK_CONCURRENCY,
@@ -20,6 +25,7 @@ import {
 import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
 import { formatLocalDateTime, normalizePublishedDateTime } from "../../../shared/date-normalizer.js";
+import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -44,6 +50,25 @@ import {
   openRowsJsonPreview,
   renderDataFilterPanel
 } from "../../../shared/data-table-filter.js";
+import {
+  createDataColumnVisibility,
+  downloadDataRowsCsv,
+  projectDataRowsByColumns,
+  renderConfiguredDataTable,
+  renderDataColumnSettingsPanel,
+  scheduleDataColumnRender,
+  showAllDataColumns
+} from "../../../shared/data-column-settings.js";
+import {
+  getFeatureRunnerPanelState,
+  handleFeatureRunnerPanelAction,
+  renderFeatureRunnerModeButton,
+  renderFeatureRunnerPanel,
+  subscribeFeatureRunnerPanel,
+  syncFeatureRunnerDraft,
+  updateFeatureRunnerDraft
+} from "../../../shared/feature-runner-panel.js";
+import { renderPageParametersCard } from "../../../shared/page-parameters.js";
 
 const STORAGE_KEY = "browserCoreClawGoogleNewsV1";
 const FEATURE_KEY = "google/google-news";
@@ -56,6 +81,15 @@ const DATA_FILTER_DEFINITIONS = Object.freeze([
   { key: "publishedAt", label: "发布时间", placeholder: "例如 2026-07-15" },
   { key: "collectedAt", label: "采集时间", placeholder: "例如 2026-07-16" },
   { key: "url", label: "链接" }
+]);
+const DATA_COLUMNS = Object.freeze([
+  { key: "keyword", label: "关键词" },
+  { key: "title", label: "新闻标题", type: "long" },
+  { key: "description", label: "描述", type: "long" },
+  { key: "source", label: "来源" },
+  { key: "publishedAt", label: "发布时间" },
+  { key: "collectedAt", label: "采集时间" },
+  { key: "url", label: "链接", type: "link" }
 ]);
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
@@ -76,6 +110,7 @@ const SAMPLE_CONFIG = Object.freeze({
   concurrency: DEFAULT_TASK_CONCURRENCY,
   timeRange: "last_hour",
   language: "zh-CN",
+  forceUpdateData: false,
   polling: false,
   pollingMinutes: 10
 });
@@ -126,6 +161,9 @@ function normalizeConfig(input) {
   if (!keywords.length) {
     throw new Error("请至少保留一个非空关键词。");
   }
+  if (input.forceUpdateData !== undefined && typeof input.forceUpdateData !== "boolean") {
+    throw new Error("forceUpdateData 必须是布尔值 true 或 false。");
+  }
 
   const legacyIntervalMs = input.keywordIntervalSeconds !== undefined
     ? Number(input.keywordIntervalSeconds) * 1000
@@ -154,6 +192,7 @@ function normalizeConfig(input) {
     language: ["zh-CN", "en-US", "ja-JP"].includes(input.language)
       ? input.language
       : SAMPLE_CONFIG.language,
+    forceUpdateData: normalizeForceUpdateData(input.forceUpdateData),
     polling: Boolean(input.polling),
     pollingMinutes: asInteger(input.pollingMinutes, SAMPLE_CONFIG.pollingMinutes, 1, 1440)
   };
@@ -216,7 +255,9 @@ function normalizeRecord(record, index = 0) {
     status: normalized.status || RECORD_STATUS_META[statusKey].label,
     statusKey,
     tone: normalized.tone || RECORD_STATUS_META[statusKey].tone,
+    executionType: normalizeTaskExecutionType(normalized),
     resultCount: Number(normalized.resultCount) || 0,
+    addedCount: Number(normalized.addedCount) || 0,
     duration: normalized.duration || "-"
   });
 }
@@ -369,6 +410,7 @@ function saveState(state) {
     config: state.config,
     records: limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
     dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
+    dataColumnVisibility: state.dataColumnVisibility,
     notice: state.notice
   };
   chrome.storage.local.set({ [STORAGE_KEY]: value }).catch(() => {});
@@ -448,13 +490,38 @@ function renderJsonMode(state) {
   `;
 }
 
+function renderPageParameters(state) {
+  return renderPageParametersCard({
+    prefix: "news",
+    open: state.pageParametersOpen,
+    description: "页面参数会用于构造 Google 新闻搜索页；运行选项仅控制任务调度、循环和本地数据写入。",
+    configuredCount: 2,
+    body: `
+      <label class="news-control">
+        <span>时间范围</span>
+        <select data-field="timeRange" disabled><option value="last_hour" selected>最近一小时</option></select>
+        <small>通过 Google 新闻搜索参数固定最近一小时。</small>
+      </label>
+      <label class="news-control">
+        <span>界面语言</span>
+        <select data-field="language" ${state.running ? "disabled" : ""}>
+          <option value="zh-CN" ${state.config.language === "zh-CN" ? "selected" : ""}>简体中文</option>
+          <option value="en-US" ${state.config.language === "en-US" ? "selected" : ""}>English</option>
+          <option value="ja-JP" ${state.config.language === "ja-JP" ? "selected" : ""}>日本語</option>
+        </select>
+        <small>用于 Google 搜索页面的语言参数。</small>
+      </label>
+    `
+  });
+}
+
 function renderRunOptions(state) {
   return `
     <section class="news-options-card">
       <button class="news-options-header" type="button" data-action="toggle-options" aria-expanded="${state.optionsOpen}">
         <span class="news-options-title">
           <strong>运行选项</strong>
-          <small>调整条数、并发任务、间隔、语言和轮询</small>
+          <small>调整条数、并发任务、间隔和轮询</small>
         </span>
         <span class="news-option-summary" aria-label="当前运行选项摘要">
           <span><small>关键词</small><strong>${state.config.keywords.length}</strong></span>
@@ -493,22 +560,12 @@ function renderRunOptions(state) {
               </div>
               <small>每个关键词完成后，会在 ${formatKeywordIntervalRange(state.config)} 内重新随机等待。</small>
             </label>
-            <label class="news-control">
-              <span>时间范围</span>
-              <select data-field="timeRange" disabled><option value="last_hour" selected>最近一小时</option></select>
-              <small>通过 Google 新闻搜索参数固定最近一小时。</small>
-            </label>
-            <label class="news-control">
-              <span>界面语言</span>
-              <select data-field="language" ${state.running ? "disabled" : ""}>
-                <option value="zh-CN" ${state.config.language === "zh-CN" ? "selected" : ""}>简体中文</option>
-                <option value="en-US" ${state.config.language === "en-US" ? "selected" : ""}>English</option>
-                <option value="ja-JP" ${state.config.language === "ja-JP" ? "selected" : ""}>日本語</option>
-              </select>
-              <small>用于 Google 搜索页面的语言参数。</small>
-            </label>
           </div>
           <div class="news-polling-row">
+            <label class="news-switch-control">
+              <input type="checkbox" data-field="forceUpdateData" ${state.config.forceUpdateData ? "checked" : ""} ${state.running ? "disabled" : ""}>
+              <span><strong>强制更新数据</strong><small>遇到相同数据时，使用本次采集结果覆盖本地旧数据。</small></span>
+            </label>
             <label class="news-switch-control">
               <input type="checkbox" data-field="polling" ${state.config.polling ? "checked" : ""} ${state.running ? "disabled" : ""}>
               <span><strong>循环监控</strong><small>每轮完成后等待设定周期，再自动开始下一轮，直到手动停止。</small></span>
@@ -528,15 +585,22 @@ function renderRunOptions(state) {
 }
 
 function renderParameters(state) {
+  const modeDisabled = state.running || state.runnerPanel.running;
+  const modeContent = state.mode === "form"
+    ? renderFormMode(state)
+    : state.mode === "json"
+      ? renderJsonMode(state)
+      : renderFeatureRunnerPanel(state.runnerPanel, { escapeHtml, disabled: state.running });
   return `
     <section class="news-parameter-card">
       <div class="news-mode-switch" role="tablist" aria-label="参数编辑方式">
-        <button class="${state.mode === "form" ? "active" : ""}" type="button" data-action="set-mode" data-mode="form" ${state.running ? "disabled" : ""}>表单</button>
-        <button class="${state.mode === "json" ? "active" : ""}" type="button" data-action="set-mode" data-mode="json" ${state.running ? "disabled" : ""}>JSON</button>
+        <button class="${state.mode === "form" ? "active" : ""}" type="button" data-action="set-mode" data-mode="form" ${modeDisabled ? "disabled" : ""}>表单</button>
+        <button class="${state.mode === "json" ? "active" : ""}" type="button" data-action="set-mode" data-mode="json" ${modeDisabled ? "disabled" : ""}>JSON</button>
+        <button class="${state.mode === "runner" ? "active" : ""}" type="button" data-action="set-mode" data-mode="runner" ${modeDisabled ? "disabled" : ""}>运行器</button>
       </div>
-      ${state.mode === "form" ? renderFormMode(state) : renderJsonMode(state)}
+      ${modeContent}
     </section>
-    ${renderRunOptions(state)}
+    ${state.mode === "runner" ? "" : `${renderPageParameters(state)}${renderRunOptions(state)}`}
   `;
 }
 
@@ -574,15 +638,23 @@ function renderRecordStatus(record) {
   return `<span class="news-table-status ${escapeHtml(tone)}">${escapeHtml(record.status)}</span>`;
 }
 
+function renderExecutionType(record) {
+  const executionType = normalizeTaskExecutionType(record);
+  return `<span class="task-execution-type ${executionType}">${escapeHtml(getTaskExecutionTypeLabel(executionType))}</span>`;
+}
+
 export function filterRecords(records, filters = {}) {
   const keywordFilter = filters.keyword || ALL_RECORD_FILTER;
   const statusFilter = filters.status || ALL_RECORD_FILTER;
+  const executionTypeFilter = filters.executionType || ALL_RECORD_FILTER;
   return (Array.isArray(records) ? records : []).filter((record) => {
     const keywordMatches = keywordFilter === ALL_RECORD_FILTER
       || record.keyword === keywordFilter;
     const statusMatches = statusFilter === ALL_RECORD_FILTER
       || getRecordStatusKey(record) === statusFilter;
-    return keywordMatches && statusMatches;
+    const executionTypeMatches = executionTypeFilter === ALL_RECORD_FILTER
+      || normalizeTaskExecutionType(record) === executionTypeFilter;
+    return keywordMatches && statusMatches && executionTypeMatches;
   });
 }
 
@@ -606,6 +678,14 @@ function renderRecordFilters(state, filteredCount) {
           ${statusOptions.map(([statusKey, meta]) => `<option value="${statusKey}" ${state.recordFilters.status === statusKey ? "selected" : ""}>${meta.label}</option>`).join("")}
         </select>
       </label>
+      <label class="news-filter-control">
+        <span>类型</span>
+        <select data-record-filter="executionType">
+          <option value="${ALL_RECORD_FILTER}">全部类型</option>
+          <option value="manual" ${state.recordFilters.executionType === "manual" ? "selected" : ""}>普通运行</option>
+          <option value="runner" ${state.recordFilters.executionType === "runner" ? "selected" : ""}>运行器</option>
+        </select>
+      </label>
       <span class="news-filter-result">显示 ${filteredCount} / ${state.records.length} 条</span>
     </div>
   `;
@@ -621,19 +701,21 @@ function renderRecords(state) {
       ${renderRecordFilters(state, records.length)}
       <div class="news-table-shell records" tabindex="0" aria-label="可滚动的运行记录表格">
         <table class="news-table">
-          <thead><tr><th>任务编号</th><th>开始时间</th><th>关键词</th><th>轮次</th><th>状态</th><th>数据量</th><th>耗时</th></tr></thead>
+          <thead><tr><th>任务编号</th><th>类型</th><th>开始时间</th><th>关键词</th><th>轮次</th><th>状态</th><th>结果数量</th><th>新增数量</th><th>耗时</th></tr></thead>
           <tbody>
             ${records.length ? records.map((record) => `
               <tr>
                 <td><button class="news-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}" title="查看当前关键词任务明细"><code>${escapeHtml(getTaskId(record))}</code></button></td>
+                <td>${renderExecutionType(record)}</td>
                 <td>${escapeHtml(record.startedAt)}</td>
                 <td>${escapeHtml(record.keyword || "-")}</td>
                 <td>${escapeHtml(record.round || "-")}</td>
                 <td title="${escapeHtml(record.error || "")}">${renderRecordStatus(record)}</td>
                 <td>${record.resultCount}</td>
+                <td>${record.addedCount}</td>
                 <td>${escapeHtml(record.duration || "-")}</td>
               </tr>
-            `).join("") : `<tr><td class="news-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}
+            `).join("") : `<tr><td class="news-table-empty" colspan="9">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -654,28 +736,25 @@ function renderTaskDetails(state) {
 
 function renderData(state) {
   const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+  const exportRows = buildGoogleNewsExportRows(filteredRows);
   return `
     <section class="news-content-card news-table-page">
       <div class="news-panel-head">
         <div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；发布时间和采集时间统一为 YYYY-MM-DD HH:mm:ss。</p></div>
+        ${renderDataColumnSettingsPanel({ columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, expanded: state.dataColumnsOpen, escapeHtml })}
       </div>
       ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="news-table-shell data" tabindex="0" aria-label="可滚动的 Google 新闻采集数据表格">
         <table class="news-table news-data-table">
-          <thead><tr><th>关键词</th><th>新闻标题</th><th>描述</th><th>来源</th><th>发布时间</th><th>采集时间</th><th>链接</th></tr></thead>
-          <tbody>
-            ${filteredRows.length ? filteredRows.map((row) => `
-              <tr>
-                <td>${escapeHtml(row.keyword)}</td>
-                <td class="news-title-cell" title="${escapeHtml(row.title)}">${escapeHtml(row.title)}</td>
-                <td class="news-description-cell" title="${escapeHtml(row.description || row.desc || "")}">${escapeHtml(row.description || row.desc || "-")}</td>
-                <td>${escapeHtml(row.source || "-")}</td>
-                <td>${escapeHtml(row.publishedAt || "-")}</td>
-                <td>${escapeHtml(row.collectedAt || "-")}</td>
-                <td><a href="${escapeHtml(row.url)}" target="_blank" rel="noreferrer">打开</a></td>
-              </tr>
-            `).join("") : `<tr><td class="news-table-empty" colspan="7">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，Google 新闻结果会显示在这里"}</td></tr>`}
-          </tbody>
+          ${renderConfiguredDataTable({
+            rows: exportRows,
+            columns: DATA_COLUMNS,
+            visibility: state.dataColumnVisibility,
+            escapeHtml,
+            emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，Google 新闻结果会显示在这里",
+            emptyClass: "news-table-empty",
+            longCellClass: "news-description-cell"
+          })}
         </table>
       </div>
     </section>
@@ -715,6 +794,14 @@ function renderBatchModal(state) {
 }
 
 function renderRunButton(state, className = "") {
+  if (state.mode === "runner") {
+    return renderFeatureRunnerModeButton(state.runnerPanel, {
+      className,
+      primaryClass: "news-primary-button",
+      stopClass: "news-stop-button",
+      disabled: state.running
+    });
+  }
   if (state.running) {
     return `<button class="news-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`;
   }
@@ -726,8 +813,8 @@ function renderActionBar(state) {
     return `
       <footer class="news-action-bar">
         ${renderRunButton(state)}
-        <button class="news-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原示例输入</button>
-        <span>${state.verificationPending ? "等待你在 Google 页面完成人机验证；完成后任务会自动恢复。" : state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : isExtensionRuntime() ? "无需预先打开 Google 页面，扩展会自动准备标签页。" : "网页预览仅打开搜索页；扩展环境才会采集数据。"}</span>
+        <button class="news-secondary-button" type="button" data-action="reset" ${state.running || state.runnerPanel.running ? "disabled" : ""}>还原示例输入</button>
+        <span>${state.mode === "runner" ? "Runner 使用完整 JSON 配置创建后台任务，并将结果写回当前功能数据。" : state.verificationPending ? "等待你在 Google 页面完成人机验证；完成后任务会自动恢复。" : state.running ? "任务运行中，参数已锁定；可点击停止终止任务。" : isExtensionRuntime() ? "无需预先打开 Google 页面，扩展会自动准备标签页。" : "网页预览仅打开搜索页；扩展环境才会采集数据。"}</span>
       </footer>
     `;
   }
@@ -831,17 +918,18 @@ function mergeDataRows(state, keyword, data, task) {
       capturedAt
     };
   });
-  const existing = new Map(state.dataRows.map((row) => [row.id, row]));
-  let added = 0;
-  for (const row of incoming) {
-    if (!existing.has(row.id)) added += 1;
-    existing.set(row.id, tagTaskDataRow({ ...existing.get(row.id), ...row }, task));
-  }
+  const merged = mergeDataRowsByKey({
+    currentRows: state.dataRows,
+    incomingRows: incoming,
+    getKey: (row) => row.id,
+    forceUpdateData: state.config.forceUpdateData,
+    mergeRow: (previous, row) => tagTaskDataRow({ ...previous, ...row }, task)
+  });
   state.dataRows = applyItemLimit(
-    [...existing.values()].sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))),
+    merged.rows.sort((a, b) => String(b.capturedAt).localeCompare(String(a.capturedAt))),
     state.dataStorageLimit
   );
-  return added;
+  return merged.addedCount;
 }
 
 export async function mountGoogleNewsMonitor(container, context) {
@@ -857,9 +945,10 @@ export async function mountGoogleNewsMonitor(container, context) {
     legacyMinMs: 100,
     legacyMaxMs: 1000
   });
+  const runnerPanel = getFeatureRunnerPanelState(FEATURE_KEY);
   const state = {
     tab: "params",
-    mode: "form",
+    mode: runnerPanel.running ? "runner" : "form",
     config: savedConfig ? normalizeConfig(savedConfig) : cloneSampleConfig(),
     jsonDraft: "",
     batchOpen: false,
@@ -868,12 +957,15 @@ export async function mountGoogleNewsMonitor(container, context) {
     guideOpen: false,
     taskDetailRecordId: "",
     optionsOpen: false,
+    pageParametersOpen: false,
     running: Boolean(activeGoogleNewsRun),
     stopping: Boolean(activeGoogleNewsRun?.stopRequested),
     verificationPending: Boolean(activeGoogleNewsRun?.verificationPending),
-    recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
+    recordFilters: { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER, executionType: ALL_RECORD_FILTER },
     dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS),
     dataFiltersOpen: true,
+    dataColumnVisibility: createDataColumnVisibility(DATA_COLUMNS, saved?.dataColumnVisibility),
+    dataColumnsOpen: false,
     notice: saved?.notice || (!isExtensionRuntime()
       ? { tone: "info", text: "当前是网页预览：运行会打开 Google 新闻搜索页；数据采集请在 Chrome 中加载扩展后测试。" }
       : null),
@@ -885,7 +977,8 @@ export async function mountGoogleNewsMonitor(container, context) {
         saved.dataRows.map(normalizeStoredDataRow),
         storageLimits.dataStorageLimit
       )
-      : []
+      : [],
+    runnerPanel
   };
   saveState(state);
   let disposed = false;
@@ -964,7 +1057,9 @@ export async function mountGoogleNewsMonitor(container, context) {
       status: RECORD_STATUS_META.running.label,
       statusKey: "running",
       tone: RECORD_STATUS_META.running.tone,
+      executionType: TASK_EXECUTION_TYPE_MANUAL,
       resultCount: 0,
+      addedCount: 0,
       duration: "-",
       error: ""
     };
@@ -973,12 +1068,13 @@ export async function mountGoogleNewsMonitor(container, context) {
     return { record, startedAtMs };
   };
 
-  const finishRecord = (record, startedAtMs, statusKey, resultCount = 0, error = "") => {
+  const finishRecord = (record, startedAtMs, statusKey, resultCount = 0, addedCount = 0, error = "") => {
     const meta = RECORD_STATUS_META[statusKey] || RECORD_STATUS_META.error;
     record.status = meta.label;
     record.statusKey = statusKey;
     record.tone = meta.tone;
     record.resultCount = resultCount;
+    record.addedCount = addedCount;
     record.error = error;
     record.duration = formatDuration(Date.now() - startedAtMs);
     state.records = limitRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit);
@@ -1041,7 +1137,7 @@ export async function mountGoogleNewsMonitor(container, context) {
         } catch (error) {
           const errorText = error.message || String(error);
           previewError = errorText;
-          finishRecord(previewRecord.record, previewRecord.startedAtMs, "error", 0, errorText);
+          finishRecord(previewRecord.record, previewRecord.startedAtMs, "error", 0, 0, errorText);
           state.notice = { tone: "error", text: `${keyword} 打开失败：${errorText}` };
           break;
         }
@@ -1235,10 +1331,19 @@ export async function mountGoogleNewsMonitor(container, context) {
                   runId: control.runId,
                   recordId: keywordRecord.record.id
                 });
+                const resultCount = Array.isArray(response.data?.results)
+                  ? response.data.results.length
+                  : Number(response.data?.resultCount) || 0;
                 roundAdded += added;
                 addedTotal += added;
                 settledKeywordIndexes.add(index);
-                finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "success", added);
+                finishRecord(
+                  keywordRecord.record,
+                  keywordRecord.startedAtMs,
+                  "success",
+                  resultCount,
+                  added
+                );
               } catch (error) {
                 if (control.stopRequested) {
                   finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "stopped");
@@ -1254,7 +1359,7 @@ export async function mountGoogleNewsMonitor(container, context) {
                   state.verificationPending = false;
                   roundFailed += 1;
                   settledKeywordIndexes.add(index);
-                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, 0, errorText);
                   state.notice = { tone: "error", text: `Google 验证流程中断：${errorText}` };
                 } else if (isGoogleNewsRiskControlError(error)) {
                   const errorText = error.message || String(error);
@@ -1262,7 +1367,7 @@ export async function mountGoogleNewsMonitor(container, context) {
                   riskTotal += 1;
                   settledKeywordIndexes.add(index);
                   await abortForUnexpectedRiskControl();
-                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "risk", 0, errorText);
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "risk", 0, 0, errorText);
                   state.notice = {
                     tone: "error",
                     text: "Google 风控状态通知异常，已停止本批任务并关闭采集标签页。请重新加载扩展后再试。"
@@ -1271,7 +1376,7 @@ export async function mountGoogleNewsMonitor(container, context) {
                   const errorText = error.message || String(error);
                   roundFailed += 1;
                   settledKeywordIndexes.add(index);
-                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, errorText);
+                  finishRecord(keywordRecord.record, keywordRecord.startedAtMs, "error", 0, 0, errorText);
                   state.notice = { tone: "error", text: `${keyword} 采集失败：${errorText}` };
                 }
               } finally {
@@ -1334,7 +1439,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       if (!control.stopRequested) {
         keywords.forEach((keyword, index) => {
           const failedRecord = createKeywordRecord(control, keyword, completedRounds + 1, index);
-          finishRecord(failedRecord.record, failedRecord.startedAtMs, "error", 0, errorText);
+          finishRecord(failedRecord.record, failedRecord.startedAtMs, "error", 0, 0, errorText);
         });
       }
       if (control.stopRequested) {
@@ -1451,13 +1556,36 @@ export async function mountGoogleNewsMonitor(container, context) {
       });
       return;
     }
+    if (action?.startsWith("runner-")) {
+      await handleFeatureRunnerPanelAction(state.runnerPanel, action, {
+        disabled: state.running,
+        getParameters: () => ({ ...state.config, keywords: [...state.config.keywords] }),
+        onChange: render,
+        onFinished: async () => {
+          const latest = await loadSavedState().catch(() => null);
+          if (Array.isArray(latest?.dataRows)) {
+            state.dataRows = applyItemLimit(
+              latest.dataRows.map(normalizeStoredDataRow),
+              state.dataStorageLimit
+            );
+          }
+        }
+      });
+      return;
+    }
     if (action === "set-mode") {
       const nextMode = button.dataset.mode;
-      if (nextMode === "form" && state.mode === "json" && !applyJsonDraft()) {
+      if (nextMode !== "json" && state.mode === "json" && !applyJsonDraft()) {
         render();
         return;
       }
       if (nextMode === "json") syncJsonDraft();
+      if (nextMode === "runner") {
+        syncFeatureRunnerDraft(state.runnerPanel, {
+          ...state.config,
+          keywords: [...state.config.keywords]
+        }, { force: true });
+      }
       state.mode = nextMode;
       render();
       return;
@@ -1527,6 +1655,11 @@ export async function mountGoogleNewsMonitor(container, context) {
       render();
       return;
     }
+    if (action === "toggle-page-parameters") {
+      state.pageParametersOpen = !state.pageParametersOpen;
+      render();
+      return;
+    }
     if (action === "toggle-data-filters") {
       state.dataFiltersOpen = !state.dataFiltersOpen;
       render();
@@ -1537,6 +1670,17 @@ export async function mountGoogleNewsMonitor(container, context) {
       render();
       return;
     }
+    if (action === "toggle-data-columns") {
+      state.dataColumnsOpen = !state.dataColumnsOpen;
+      scheduleDataColumnRender(render);
+      return;
+    }
+    if (action === "show-all-data-columns") {
+      state.dataColumnVisibility = showAllDataColumns(DATA_COLUMNS);
+      saveState(state);
+      scheduleDataColumnRender(render);
+      return;
+    }
     if (action === "apply-json") {
       applyJsonDraft();
       render();
@@ -1544,7 +1688,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     }
     if (action === "clear-records") {
       state.records = [];
-      state.recordFilters = { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER };
+      state.recordFilters = { keyword: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER, executionType: ALL_RECORD_FILTER };
       state.taskDetailRecordId = "";
       saveState(state);
       render();
@@ -1553,7 +1697,11 @@ export async function mountGoogleNewsMonitor(container, context) {
     if (action === "copy-json") {
       const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
       try {
-        openRowsJsonPreview(rows, buildGoogleNewsExportRows);
+        openRowsJsonPreview(rows, (currentRows) => projectDataRowsByColumns(
+          buildGoogleNewsExportRows(currentRows),
+          DATA_COLUMNS,
+          state.dataColumnVisibility
+        ));
       } catch (error) {
         state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
         render();
@@ -1562,7 +1710,12 @@ export async function mountGoogleNewsMonitor(container, context) {
     }
     if (action === "export-csv") {
       const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
-      downloadGoogleNewsData(rows, "csv");
+      downloadDataRowsCsv(
+        buildGoogleNewsExportRows(rows),
+        DATA_COLUMNS,
+        state.dataColumnVisibility,
+        "google-news-data"
+      );
       state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
       render();
       return;
@@ -1578,6 +1731,7 @@ export async function mountGoogleNewsMonitor(container, context) {
       state.config = cloneSampleConfig();
       state.inputListPage = 1;
       state.optionsOpen = false;
+      state.pageParametersOpen = false;
       state.notice = { tone: "success", text: "已还原示例输入。" };
       syncJsonDraft();
       saveState(state);
@@ -1607,6 +1761,10 @@ export async function mountGoogleNewsMonitor(container, context) {
       state.jsonDraft = event.target.value;
       return;
     }
+    if (event.target.matches("[data-runner-json-input]")) {
+      updateFeatureRunnerDraft(state.runnerPanel, event.target.value);
+      return;
+    }
     if (event.target.matches("[data-batch-input]")) {
       state.batchDraft = event.target.value;
       return;
@@ -1620,6 +1778,14 @@ export async function mountGoogleNewsMonitor(container, context) {
   };
 
   const handleChange = (event) => {
+    const dataColumn = event.target.dataset.dataColumn;
+    if (dataColumn) {
+      state.dataColumnVisibility[dataColumn] = event.target.checked;
+      state.dataColumnVisibility = createDataColumnVisibility(DATA_COLUMNS, state.dataColumnVisibility);
+      saveState(state);
+      scheduleDataColumnRender(render);
+      return;
+    }
     const dataFilter = event.target.dataset.dataFilter;
     if (dataFilter) {
       state.dataFilters[dataFilter] = event.target.value;
@@ -1643,6 +1809,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     }
     if (field === "language") state.config.language = event.target.value;
     if (field === "concurrency") state.config.concurrency = normalizeTaskConcurrency(state.config.concurrency);
+    if (field === "forceUpdateData") state.config.forceUpdateData = event.target.checked;
     if (field === "polling") {
       state.config.polling = event.target.checked;
       render();
@@ -1658,6 +1825,20 @@ export async function mountGoogleNewsMonitor(container, context) {
   };
 
   syncJsonDraft();
+  syncFeatureRunnerDraft(state.runnerPanel, {
+    ...state.config,
+    keywords: [...state.config.keywords]
+  });
+  const unsubscribeRunnerPanel = subscribeFeatureRunnerPanel(state.runnerPanel, render, async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+    if (Array.isArray(latest?.dataRows)) {
+      state.dataRows = applyItemLimit(latest.dataRows.map(normalizeStoredDataRow), state.dataStorageLimit);
+    }
+  }, async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.records = limitRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+  });
   container.addEventListener("click", handleClick);
   container.addEventListener("input", handleInput);
   container.addEventListener("change", handleChange);
@@ -1675,6 +1856,7 @@ export async function mountGoogleNewsMonitor(container, context) {
     document.removeEventListener("keydown", handleKeydown);
     globalThis.removeEventListener?.(GOOGLE_NEWS_RUN_FINISHED_EVENT, handleLiveRunFinished);
     globalThis.removeEventListener?.(GOOGLE_NEWS_RUN_STATUS_EVENT, handleLiveRunStatus);
+    unsubscribeRunnerPanel();
     container.replaceChildren();
   };
 }

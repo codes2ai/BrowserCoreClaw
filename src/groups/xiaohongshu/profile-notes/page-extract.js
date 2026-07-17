@@ -1,5 +1,10 @@
 export async function runXiaohongshuProfilePageCommand(command, options = {}) {
   const normalText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizeLikes = (value) => {
+    const text = normalText(value);
+    if (!text || /^(?:赞|点赞|喜欢|likes?)$/i.test(text)) return "0";
+    return text.replace(/^(?:点赞|喜欢)\s*/i, "").trim() || "0";
+  };
   const isVisible = (element) => {
     const style = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
@@ -81,7 +86,7 @@ export async function runXiaohongshuProfilePageCommand(command, options = {}) {
         noteId,
         title: normalText(card.querySelector("a.title")?.innerText),
         author: normalText(card.querySelector(".author .name")?.innerText),
-        likes: normalText(card.querySelector(".like-wrapper .count")?.innerText),
+        likes: normalizeLikes(card.querySelector(".like-wrapper .count")?.innerText),
         cover: coverImage?.currentSrc || coverImage?.src || "",
         url: noteUrl
       });

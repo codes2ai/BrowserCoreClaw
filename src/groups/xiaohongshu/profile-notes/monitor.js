@@ -1,6 +1,5 @@
 import {
-  buildXiaohongshuProfileExportRows,
-  downloadXiaohongshuProfileData
+  buildXiaohongshuProfileExportRows
 } from "./export-data.js";
 import {
   MESSAGE_CAPTURE_XIAOHONGSHU_PROFILE,
@@ -20,6 +19,8 @@ import {
 } from "../../../shared/concurrent-task-pool.js";
 import { setFeatureRunning } from "../../../shared/feature-run-status.js";
 import { loadTaskTimeoutSeconds, runWithTaskTimeout } from "../../../shared/task-timeout.js";
+import { normalizeXiaohongshuLikes } from "../likes-normalizer.js";
+import { mergeDataRowsByKey, normalizeForceUpdateData } from "../../../shared/data-update-policy.js";
 import {
   applyItemLimit,
   DEFAULT_TASK_RECORDS_PER_STATUS_LIMIT,
@@ -44,6 +45,30 @@ import {
   openRowsJsonPreview,
   renderDataFilterPanel
 } from "../../../shared/data-table-filter.js";
+import {
+  createDataColumnVisibility,
+  downloadDataRowsCsv,
+  projectDataRowsByColumns,
+  renderConfiguredDataTable,
+  renderDataColumnSettingsPanel,
+  scheduleDataColumnRender,
+  showAllDataColumns
+} from "../../../shared/data-column-settings.js";
+import {
+  getFeatureRunnerPanelState,
+  handleFeatureRunnerPanelAction,
+  renderFeatureRunnerModeButton,
+  renderFeatureRunnerPanel,
+  subscribeFeatureRunnerPanel,
+  syncFeatureRunnerDraft,
+  updateFeatureRunnerDraft
+} from "../../../shared/feature-runner-panel.js";
+import {
+  getTaskExecutionTypeLabel,
+  normalizeTaskExecutionType,
+  TASK_EXECUTION_TYPE_MANUAL
+} from "../../../shared/task-record-type.js";
+import { renderPageParametersCard } from "../../../shared/page-parameters.js";
 
 const STORAGE_KEY = "browserCoreClawXiaohongshuProfileV1";
 const FEATURE_KEY = "xiaohongshu/profile-notes";
@@ -57,18 +82,30 @@ const DATA_FILTER_DEFINITIONS = Object.freeze([
   { key: "noteUrl", label: "博文链接" },
   { key: "capturedAt", label: "采集时间", placeholder: "例如 2025-11-18" }
 ]);
+const DATA_COLUMNS = Object.freeze([
+  { key: "pageOrder", label: "顺序" },
+  { key: "noteId", label: "博文 ID" },
+  { key: "noteTitle", label: "博文标题", type: "long" },
+  { key: "noteAuthor", label: "作者" },
+  { key: "noteLikes", label: "点赞" },
+  { key: "noteCover", label: "封面", type: "image" },
+  { key: "noteUrl", label: "博文链接", type: "link" },
+  { key: "collectedAt", label: "采集时间" }
+]);
 const DEFAULT_PROFILE_URLS = [""];
 const DEFAULT_OPTIONS = Object.freeze({
   limit: 20,
   intervalMinMs: DEFAULT_EXECUTION_INTERVAL_MIN_MS,
   intervalMaxMs: DEFAULT_EXECUTION_INTERVAL_MAX_MS,
   concurrency: DEFAULT_TASK_CONCURRENCY,
+  forceUpdateData: false,
   polling: false,
   pollingMinutes: 10
 });
 const RECORD_STATUS_META = Object.freeze({
   running: { label: "运行中", tone: "running" },
   success: { label: "完成", tone: "success" },
+  empty: { label: "无数据", tone: "success" },
   partial: { label: "部分完成", tone: "warning" },
   error: { label: "失败", tone: "error" },
   stopped: { label: "已停止", tone: "stopped" }
@@ -127,6 +164,49 @@ function isXiaohongshuProfileUrl(value) {
   }
 }
 
+function buildProfileJsonParameters(state) {
+  return {
+    profileUrls: [...state.profileUrls],
+    limit: state.limit,
+    concurrency: state.concurrency,
+    intervalMinMs: state.intervalMinMs,
+    intervalMaxMs: state.intervalMaxMs,
+    forceUpdateData: Boolean(state.forceUpdateData),
+    polling: Boolean(state.polling),
+    pollingMinutes: state.pollingMinutes
+  };
+}
+
+function normalizeProfileJsonParameters(input, state) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("JSON 顶层必须是一个对象。");
+  }
+  if (!Array.isArray(input.profileUrls)) throw new Error("profileUrls 必须是字符串数组。");
+  const profileUrls = uniqueUrls(input.profileUrls);
+  if (!profileUrls.length && !input.profileUrls.length) throw new Error("profileUrls 至少需要保留一个输入项。");
+  if (!profileUrls.length) profileUrls.push("");
+  const invalidUrl = profileUrls.find((url) => url && !isXiaohongshuProfileUrl(url));
+  if (invalidUrl) throw new Error(`博主主页链接格式不正确：${invalidUrl}`);
+  if (input.polling !== undefined && typeof input.polling !== "boolean") {
+    throw new Error("polling 必须是布尔值 true 或 false。");
+  }
+  if (input.forceUpdateData !== undefined && typeof input.forceUpdateData !== "boolean") {
+    throw new Error("forceUpdateData 必须是布尔值 true 或 false。");
+  }
+  return {
+    profileUrls,
+    limit: asInteger(input.limit, state.limit, 1, 100),
+    concurrency: normalizeTaskConcurrency(input.concurrency ?? state.concurrency),
+    ...normalizeProfileIntervalRange({
+      intervalMinMs: input.intervalMinMs ?? state.intervalMinMs,
+      intervalMaxMs: input.intervalMaxMs ?? state.intervalMaxMs
+    }),
+    forceUpdateData: normalizeForceUpdateData(input.forceUpdateData ?? state.forceUpdateData),
+    polling: input.polling ?? state.polling,
+    pollingMinutes: asInteger(input.pollingMinutes, state.pollingMinutes, 1, 1440)
+  };
+}
+
 export function normalizeProfileIntervalRange(config) {
   const first = asInteger(config?.intervalMinMs, DEFAULT_OPTIONS.intervalMinMs, 100, 6000);
   const second = asInteger(config?.intervalMaxMs, DEFAULT_OPTIONS.intervalMaxMs, 100, 6000);
@@ -167,6 +247,7 @@ export function getProfileRecordStatusKey(record) {
   if (RECORD_STATUS_META[record?.statusKey]) return record.statusKey;
   const status = String(record?.status || "");
   if (/停止/.test(status)) return "stopped";
+  if (/无数据/.test(status)) return "empty";
   if (/部分/.test(status)) return "partial";
   if (/失败/.test(status)) return "error";
   if (/完成/.test(status)) return "success";
@@ -185,7 +266,9 @@ function normalizeRecord(record, index = 0) {
     status: normalized.status || meta.label,
     statusKey,
     tone: normalized.tone || meta.tone,
+    executionType: normalizeTaskExecutionType(normalized),
     resultCount: Number(normalized.resultCount) || 0,
+    addedCount: Number(normalized.addedCount) || 0,
     duration: normalized.duration || "-",
     error: normalized.error || ""
   };
@@ -202,9 +285,11 @@ export function limitProfileRecordsPerStatus(records, limit = DEFAULT_TASK_RECOR
 export function filterProfileRecords(records, filters = {}) {
   const profileFilter = filters.profile || ALL_RECORD_FILTER;
   const statusFilter = filters.status || ALL_RECORD_FILTER;
+  const executionTypeFilter = filters.executionType || ALL_RECORD_FILTER;
   return (Array.isArray(records) ? records : []).filter((record) => (
     (profileFilter === ALL_RECORD_FILTER || record.keyword === profileFilter)
     && (statusFilter === ALL_RECORD_FILTER || getProfileRecordStatusKey(record) === statusFilter)
+    && (executionTypeFilter === ALL_RECORD_FILTER || normalizeTaskExecutionType(record) === executionTypeFilter)
   ));
 }
 
@@ -259,11 +344,13 @@ function saveState(state) {
         limit: state.limit,
         concurrency: normalizeTaskConcurrency(state.concurrency),
         ...normalizeProfileIntervalRange(state),
+        forceUpdateData: Boolean(state.forceUpdateData),
         polling: Boolean(state.polling),
         pollingMinutes: asInteger(state.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440)
       },
       records: limitProfileRecordsPerStatus(state.records, state.taskRecordsPerStatusLimit),
       dataRows: applyItemLimit(state.dataRows, state.dataStorageLimit),
+      dataColumnVisibility: state.dataColumnVisibility,
       notice: state.notice
     }
   }).catch(() => {});
@@ -313,7 +400,7 @@ function renderRunOptions(state) {
       </button>
       ${state.optionsOpen ? `
         <div class="xhs-options-body">
-          <p class="xhs-options-note">没有页面筛选条件。每个主页链接都是独立任务，并发任务使用独立后台标签页；笔记不足设定数量时，以实际数量为准。</p>
+          <p class="xhs-options-note">每个主页链接都是独立任务，并发任务使用独立后台标签页；笔记不足设定数量时，以实际数量为准。</p>
           <div class="xhs-options-grid">
             <label class="xhs-control">
               <span>每个主页笔记数</span>
@@ -337,6 +424,10 @@ function renderRunOptions(state) {
           </div>
           <div class="xhs-polling-row">
             <label class="xhs-switch-control">
+              <input type="checkbox" data-field="forceUpdateData" ${state.forceUpdateData ? "checked" : ""} ${disabled}>
+              <span><strong>强制更新数据</strong><small>遇到相同博文时，使用本次采集结果覆盖本地旧数据。</small></span>
+            </label>
+            <label class="xhs-switch-control">
               <input type="checkbox" data-field="polling" ${state.polling ? "checked" : ""} ${disabled}>
               <span><strong>循环监控</strong><small>每轮主页任务完成后，按设定周期再次执行，直到手动停止。</small></span>
             </label>
@@ -351,10 +442,17 @@ function renderRunOptions(state) {
   `;
 }
 
-function renderParameters(state) {
+function renderPageParameters(state) {
+  return renderPageParametersCard({
+    prefix: "xhs",
+    open: state.pageParametersOpen,
+    description: "此功能直接按博主主页当前的笔记列表采集，不额外改写目标页面的筛选或展示状态。"
+  });
+}
+
+function renderFormParameters(state) {
   const pagination = paginateInputList(state.profileUrls, state.inputListPage);
   return `
-    <section class="xhs-parameter-card">
       <div class="xhs-field-heading">
         <div>
           <label>博主主页链接</label>
@@ -369,8 +467,35 @@ function renderParameters(state) {
         <button class="xhs-secondary-button" type="button" data-action="open-batch" ${state.running ? "disabled" : ""}>批量编辑</button>
       </div>
       <p class="xhs-profile-init-note"><strong>采集链路：</strong>复用当前 Chrome 的小红书登录会话，打开主页并等待笔记列表稳定，再按页面顺序读取博文封面、标题、作者、链接和点赞数。</p>
+  `;
+}
+
+function renderJsonParameters(state) {
+  return `
+    <div class="xhs-json-editor">
+      <div class="xhs-field-heading"><div><label for="profileNotesJsonInput">运行参数 JSON</label><p>应用后会同步到表单，并用于真实的小红书博主博文采集任务。</p></div></div>
+      <textarea id="profileNotesJsonInput" data-json-input spellcheck="false" rows="14" ${state.running ? "disabled" : ""}>${escapeHtml(state.jsonDraft)}</textarea>
+      <div class="xhs-inline-actions"><button class="xhs-secondary-button emphasized" type="button" data-action="apply-json" ${state.running ? "disabled" : ""}>校验并应用</button></div>
+    </div>
+  `;
+}
+
+function renderParameters(state) {
+  const controlsLocked = state.running || state.runnerPanel.running;
+  return `
+    <section class="xhs-parameter-card">
+      <div class="xhs-mode-switch" role="tablist" aria-label="参数编辑方式">
+        <button class="${state.mode === "form" ? "active" : ""}" type="button" data-action="set-mode" data-mode="form" ${controlsLocked ? "disabled" : ""}>表单</button>
+        <button class="${state.mode === "json" ? "active" : ""}" type="button" data-action="set-mode" data-mode="json" ${controlsLocked ? "disabled" : ""}>JSON</button>
+        <button class="${state.mode === "runner" ? "active" : ""}" type="button" data-action="set-mode" data-mode="runner" ${controlsLocked ? "disabled" : ""}>运行器</button>
+      </div>
+      ${state.mode === "form"
+        ? renderFormParameters(state)
+        : state.mode === "json"
+          ? renderJsonParameters(state)
+          : renderFeatureRunnerPanel(state.runnerPanel, { escapeHtml, disabled: state.running })}
     </section>
-    ${renderRunOptions(state)}
+    ${state.mode === "runner" ? "" : `${renderPageParameters(state)}${renderRunOptions(state)}`}
   `;
 }
 
@@ -380,6 +505,7 @@ function renderRecordFilters(state, filteredCount) {
     <div class="xhs-record-filters" aria-label="运行记录筛选">
       <label class="xhs-filter-control"><span>博主主页</span><select data-record-filter="profile"><option value="${ALL_RECORD_FILTER}">全部主页</option>${profiles.map((profile) => `<option value="${escapeHtml(profile)}" ${state.recordFilters.profile === profile ? "selected" : ""}>${escapeHtml(profile)}</option>`).join("")}</select></label>
       <label class="xhs-filter-control"><span>状态</span><select data-record-filter="status"><option value="${ALL_RECORD_FILTER}">全部状态</option>${Object.entries(RECORD_STATUS_META).map(([key, meta]) => `<option value="${key}" ${state.recordFilters.status === key ? "selected" : ""}>${meta.label}</option>`).join("")}</select></label>
+      <label class="xhs-filter-control"><span>类型</span><select data-record-filter="executionType"><option value="${ALL_RECORD_FILTER}">全部类型</option><option value="manual" ${state.recordFilters.executionType === "manual" ? "selected" : ""}>普通运行</option><option value="runner" ${state.recordFilters.executionType === "runner" ? "selected" : ""}>运行器</option></select></label>
       <span class="xhs-filter-result">显示 ${filteredCount} / ${state.records.length} 条</span>
     </div>
   `;
@@ -393,14 +519,15 @@ function renderRecords(state) {
       ${renderRecordFilters(state, records.length)}
       <div class="xhs-table-shell records" tabindex="0" aria-label="可滚动的博主采集运行记录表格">
         <table class="xhs-table">
-          <thead><tr><th>任务编号</th><th>开始时间</th><th>博主主页</th><th>轮次</th><th>状态</th><th>笔记数</th><th>耗时</th></tr></thead>
+          <thead><tr><th>任务编号</th><th>类型</th><th>开始时间</th><th>博主主页</th><th>轮次</th><th>状态</th><th>结果数量</th><th>新增数量</th><th>耗时</th></tr></thead>
           <tbody>${records.length ? records.map((record) => `
             <tr>
               <td><button class="xhs-task-id-button" type="button" data-action="open-task-detail" data-record-id="${escapeHtml(record.id)}" title="查看当前博主任务明细"><code>${escapeHtml(getTaskId(record))}</code></button></td>
+              <td><span class="task-execution-type ${normalizeTaskExecutionType(record)}">${escapeHtml(getTaskExecutionTypeLabel(record))}</span></td>
               <td>${escapeHtml(record.startedAt)}</td><td class="xhs-profile-url-cell" title="${escapeHtml(record.keyword)}">${escapeHtml(record.keyword)}</td><td>${escapeHtml(record.round)}</td>
-              <td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${escapeHtml(record.duration)}</td>
+              <td title="${escapeHtml(record.error || "")}">${renderStatus(record)}</td><td>${record.resultCount}</td><td>${record.addedCount}</td><td>${escapeHtml(record.duration)}</td>
             </tr>
-          `).join("") : `<tr><td class="xhs-table-empty" colspan="7">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody>
+          `).join("") : `<tr><td class="xhs-table-empty" colspan="9">${state.records.length ? "没有符合筛选条件的记录" : "暂无运行记录"}</td></tr>`}</tbody>
         </table>
       </div>
     </section>
@@ -409,19 +536,14 @@ function renderRecords(state) {
 
 function renderData(state) {
   const filteredRows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
+  const exportRows = buildXiaohongshuProfileExportRows(filteredRows);
   return `
     <section class="xhs-content-card xhs-table-page">
-      <div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；博文按主页卡片原始顺序保存。</p></div></div>
+      <div class="xhs-panel-head"><div><h2>数据</h2><p>共 ${state.dataRows.length} 条，最多保留 ${formatLimitValue(state.dataStorageLimit)}；博文按主页卡片原始顺序保存。</p></div>${renderDataColumnSettingsPanel({ columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, expanded: state.dataColumnsOpen, escapeHtml })}</div>
       ${renderDataFilterPanel({ rows: state.dataRows, definitions: DATA_FILTER_DEFINITIONS, values: state.dataFilters, expanded: state.dataFiltersOpen, escapeHtml })}
       <div class="xhs-table-shell data" tabindex="0" aria-label="可滚动的博文数据表格">
         <table class="xhs-table xhs-data-table">
-          <thead><tr><th>顺序</th><th>博文 ID</th><th>博文标题</th><th>作者</th><th>点赞</th><th>博文链接</th><th>封面</th><th>采集时间</th></tr></thead>
-          <tbody>${filteredRows.length ? filteredRows.map((row) => `
-            <tr>
-              <td>${row.pageOrder || "-"}</td><td>${escapeHtml(row.noteId || "-")}</td><td class="xhs-title-cell" title="${escapeHtml(row.noteTitle || "")}">${escapeHtml(row.noteTitle || "-")}</td><td>${escapeHtml(row.noteAuthor || "-")}</td><td>${escapeHtml(row.noteLikes || "-")}</td>
-              <td>${row.noteUrl ? `<a href="${escapeHtml(row.noteUrl)}" target="_blank" rel="noreferrer">打开</a>` : "-"}</td><td>${row.noteCover ? `<img class="xhs-cover-thumb" src="${escapeHtml(row.noteCover)}" alt="" loading="lazy">` : "-"}</td><td>${escapeHtml(row.capturedAt || "-")}</td>
-            </tr>
-          `).join("") : `<tr><td class="xhs-table-empty" colspan="8">${state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，主页博文卡片会显示在这里"}</td></tr>`}</tbody>
+          ${renderConfiguredDataTable({ rows: exportRows, columns: DATA_COLUMNS, visibility: state.dataColumnVisibility, escapeHtml, emptyText: state.dataRows.length ? "没有符合筛选条件的数据" : "运行后，主页博文卡片会显示在这里" })}
         </table>
       </div>
     </section>
@@ -469,13 +591,20 @@ function renderTaskDetails(state) {
 }
 
 function renderRunButton(state, className = "") {
+  if (state.mode === "runner") return renderFeatureRunnerModeButton(state.runnerPanel, {
+    className,
+    primaryClass: "xhs-primary-button",
+    stopClass: "xhs-stop-button",
+    disabled: state.running
+  });
   if (state.running) return `<button class="xhs-stop-button ${className}" type="button" data-action="stop" ${state.stopping ? "disabled" : ""}>${state.stopping ? "停止中…" : "停止全部"}</button>`;
   return `<button class="xhs-primary-button ${className}" type="button" data-action="run">运行</button>`;
 }
 
 function renderActionBar(state) {
+  const runnerMode = state.mode === "runner";
   if (state.tab === "params") return `
-    <footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running ? "disabled" : ""}>还原输入</button><span>${state.running ? "任务运行中，参数已锁定；可以停止任务。" : "运行会打开小红书博主主页，等待列表稳定后采集主页博文。"}</span></footer>
+    <footer class="xhs-action-bar">${renderRunButton(state)}<button class="xhs-secondary-button" type="button" data-action="reset" ${state.running || state.runnerPanel.running ? "disabled" : ""}>还原输入</button><span>${runnerMode ? (state.runnerPanel.running ? "Runner 后台任务运行中，配置已锁定；可以停止任务。" : "运行器会校验功能 ID 与 JSON 参数，然后创建可跟踪的后台任务。") : (state.running ? "任务运行中，参数已锁定；可以停止任务。" : "运行会打开小红书博主主页，等待列表稳定后采集主页博文。")}</span></footer>
   `;
   if (state.tab === "records") return `
     <footer class="xhs-action-bar xhs-table-action-bar"><button class="xhs-secondary-button" type="button" data-action="clear-records" ${state.records.length && !state.running ? "" : "disabled"}>清空记录</button><span>当前 ${state.records.length} 条 · 每种状态最多保留 ${formatLimitValue(state.taskRecordsPerStatusLimit)}</span></footer>
@@ -508,7 +637,7 @@ function buildPostRows(data) {
     noteId: note.noteId || "",
     noteTitle: note.title || "",
     noteAuthor: note.author || "",
-    noteLikes: note.likes || "",
+    noteLikes: normalizeXiaohongshuLikes(note.likes),
     noteCover: note.cover || "",
     noteUrl: note.url || "",
     capturedAt: data?.capturedAt || new Date().toISOString()
@@ -517,16 +646,15 @@ function buildPostRows(data) {
 
 function mergeDataRows(state, data, task) {
   const incoming = buildPostRows(data);
-  const existingById = new Map(state.dataRows.map((row) => [row.id, row]));
-  const taggedIncoming = incoming.map((row) => tagTaskDataRow({ ...existingById.get(row.id), ...row }, task));
-  const incomingIds = new Set(taggedIncoming.map((row) => row.id));
-  const priorIds = new Set(state.dataRows.map((row) => row.id));
-  const added = taggedIncoming.filter((row) => !priorIds.has(row.id)).length;
-  state.dataRows = applyItemLimit([
-    ...taggedIncoming,
-    ...state.dataRows.filter((row) => !incomingIds.has(row.id))
-  ], state.dataStorageLimit);
-  return added;
+  const merged = mergeDataRowsByKey({
+    currentRows: state.dataRows,
+    incomingRows: incoming,
+    getKey: (row) => row.id,
+    forceUpdateData: state.forceUpdateData,
+    mergeRow: (previous, row) => tagTaskDataRow({ ...previous, ...row }, task)
+  });
+  state.dataRows = applyItemLimit(merged.rows, state.dataStorageLimit);
+  return merged.addedCount;
 }
 
 export async function mountXiaohongshuProfileNotesMonitor(container, context) {
@@ -540,14 +668,19 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     legacyMaxMs: 6000
   });
   const savedInterval = normalizeProfileIntervalRange(savedConfig);
+  const runnerPanel = getFeatureRunnerPanelState(FEATURE_KEY);
   const state = {
     tab: "params",
+    mode: runnerPanel.running ? "runner" : "form",
+    runnerPanel,
+    jsonDraft: "",
     profileUrls: Array.isArray(saved?.profileUrls) && saved.profileUrls.length ? saved.profileUrls : [...DEFAULT_PROFILE_URLS],
     inputListPage: 1,
     dataStorageLimit: storageLimits.dataStorageLimit,
     taskRecordsPerStatusLimit: storageLimits.taskRecordsPerStatusLimit,
     records: limitProfileRecordsPerStatus(saved?.records, storageLimits.taskRecordsPerStatusLimit),
-    dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit),
+    dataRows: applyItemLimit(saved?.dataRows, storageLimits.dataStorageLimit)
+      .map((row) => ({ ...row, noteLikes: normalizeXiaohongshuLikes(row?.noteLikes ?? row?.likes) })),
     batchOpen: false,
     batchDraft: "",
     guideOpen: false,
@@ -556,19 +689,40 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     concurrency: normalizeTaskConcurrency(savedConfig.concurrency),
     intervalMinMs: savedInterval.intervalMinMs,
     intervalMaxMs: savedInterval.intervalMaxMs,
+    forceUpdateData: normalizeForceUpdateData(savedConfig.forceUpdateData),
     polling: Boolean(savedConfig.polling),
     pollingMinutes: asInteger(savedConfig.pollingMinutes, DEFAULT_OPTIONS.pollingMinutes, 1, 1440),
     optionsOpen: false,
+    pageParametersOpen: false,
     running: Boolean(activeProfileRun && !activeProfileRun.stopRequested),
     stopping: false,
-    recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER },
+    recordFilters: { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER, executionType: ALL_RECORD_FILTER },
     dataFilters: createDataFilterValues(DATA_FILTER_DEFINITIONS),
     dataFiltersOpen: true,
+    dataColumnVisibility: createDataColumnVisibility(DATA_COLUMNS, saved?.dataColumnVisibility),
+    dataColumnsOpen: false,
     notice: saved?.notice || { tone: "info", text: "已确认小红书登录状态。填写博主主页链接后即可采集主页博文。" }
   };
   saveState(state);
   let disposed = false;
   let activeRun = activeProfileRun;
+
+  const syncJsonDraft = () => {
+    state.jsonDraft = JSON.stringify(buildProfileJsonParameters(state), null, 2);
+  };
+  const applyJsonDraft = () => {
+    try {
+      Object.assign(state, normalizeProfileJsonParameters(JSON.parse(state.jsonDraft), state));
+      state.inputListPage = 1;
+      syncJsonDraft();
+      state.notice = { tone: "success", text: "JSON 参数已校验并同步到表单。" };
+      saveState(state);
+      return true;
+    } catch (error) {
+      state.notice = { tone: "error", text: error.message || "JSON 参数格式不正确。" };
+      return false;
+    }
+  };
 
   const render = () => {
     if (!disposed) container.innerHTML = renderPage(state, context);
@@ -581,13 +735,14 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     render();
     requestAnimationFrame(() => container.querySelector("[data-task-detail-close]")?.focus());
   };
-  const finishRecord = (recordId, startedAtMs, statusKey, resultCount = 0, error = "") => {
+  const finishRecord = (recordId, startedAtMs, statusKey, resultCount = 0, addedCount = 0, error = "") => {
     const meta = RECORD_STATUS_META[statusKey] || RECORD_STATUS_META.error;
     state.records = updateProfileRecord(state.records, recordId, {
       status: meta.label,
       statusKey,
       tone: meta.tone,
       resultCount: Number(resultCount) || 0,
+      addedCount: Number(addedCount) || 0,
       error,
       duration: formatDuration(Date.now() - startedAtMs)
     }, state.taskRecordsPerStatusLimit);
@@ -597,6 +752,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     const record = {
       id: `${control.runId}-R${round}-P${index + 1}`,
       runId: control.runId,
+      executionType: TASK_EXECUTION_TYPE_MANUAL,
       startedAt: formatTime(new Date(startedAtMs)),
       keyword: profileUrl,
       round,
@@ -604,6 +760,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       statusKey: "running",
       tone: "running",
       resultCount: 0,
+      addedCount: 0,
       duration: "-",
       error: ""
     };
@@ -697,13 +854,13 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
               const added = mergeDataRows(state, response.data, { runId: control.runId, recordId: profileRecord.record.id });
               roundAdded += added;
               addedTotal += added;
-              finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "success", response.data?.notes?.length || 0);
+              finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "success", response.data?.notes?.length || 0, added);
             } catch (error) {
               if (control.stopRequested) finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "stopped");
               else {
                 const errorText = error.message || String(error);
                 roundFailed += 1;
-                finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "error", 0, errorText);
+                finishRecord(profileRecord.record.id, profileRecord.startedAtMs, "error", 0, 0, errorText);
                 state.notice = { tone: "error", text: `博主主页采集失败：${errorText}` };
               }
             } finally {
@@ -767,6 +924,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
     state.dataRows = Array.isArray(latest?.dataRows)
       ? applyItemLimit(latest.dataRows, state.dataStorageLimit)
+        .map((row) => ({ ...row, noteLikes: normalizeXiaohongshuLikes(row?.noteLikes ?? row?.likes) }))
       : state.dataRows;
     state.notice = latest?.notice || state.notice;
     render();
@@ -783,12 +941,40 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     if (tab) { state.tab = tab.dataset.tab; render(); return; }
     const button = event.target.closest("[data-action]");
     if (!button || button.disabled) return;
-    switch (button.dataset.action) {
+    const action = button.dataset.action;
+    if (await handleFeatureRunnerPanelAction(state.runnerPanel, action, {
+      disabled: state.running,
+      getParameters: () => buildProfileJsonParameters(state),
+      onChange: render,
+      onFinished: async () => {
+        const latest = await loadSavedState().catch(() => null);
+        state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+        state.dataRows = Array.isArray(latest?.dataRows)
+          ? applyItemLimit(latest.dataRows, state.dataStorageLimit)
+            .map((row) => ({ ...row, noteLikes: normalizeXiaohongshuLikes(row?.noteLikes ?? row?.likes) }))
+          : state.dataRows;
+        state.notice = latest?.notice || state.notice;
+      }
+    })) return;
+    switch (action) {
       case "run": startRun().catch((error) => { state.running = false; state.stopping = false; activeRun = null; activeProfileRun = null; state.notice = { tone: "error", text: error.message || String(error) }; render(); }); break;
       case "stop": stopRun().catch((error) => { state.notice = { tone: "error", text: `停止任务失败：${error.message || String(error)}` }; render(); }); break;
+      case "set-mode": {
+        const nextMode = button.dataset.mode;
+        if (nextMode !== "json" && state.mode === "json" && !applyJsonDraft()) { render(); break; }
+        if (nextMode === "json") syncJsonDraft();
+        if (nextMode === "runner") syncFeatureRunnerDraft(state.runnerPanel, buildProfileJsonParameters(state), { force: true });
+        state.mode = nextMode;
+        render();
+        break;
+      }
+      case "apply-json": applyJsonDraft(); render(); break;
       case "toggle-options": state.optionsOpen = !state.optionsOpen; render(); break;
+      case "toggle-page-parameters": state.pageParametersOpen = !state.pageParametersOpen; render(); break;
       case "toggle-data-filters": state.dataFiltersOpen = !state.dataFiltersOpen; render(); break;
       case "clear-data-filters": state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS); render(); break;
+      case "toggle-data-columns": state.dataColumnsOpen = !state.dataColumnsOpen; scheduleDataColumnRender(render); break;
+      case "show-all-data-columns": state.dataColumnVisibility = showAllDataColumns(DATA_COLUMNS); saveState(state); scheduleDataColumnRender(render); break;
       case "set-input-list-page": state.inputListPage = clampInputListPage(button.dataset.page, state.profileUrls); render(); break;
       case "add-profile": state.profileUrls.push(""); state.inputListPage = pageForInputIndex(state.profileUrls.length - 1); render(); requestAnimationFrame(() => container.querySelector(`[data-profile-index="${state.profileUrls.length - 1}"]`)?.focus()); break;
       case "remove-profile": state.profileUrls.splice(Number(button.dataset.index), 1); state.inputListPage = clampInputListPage(state.inputListPage, state.profileUrls); saveState(state); render(); break;
@@ -809,12 +995,14 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       case "close-guide": state.guideOpen = false; render(); break;
       case "open-task-detail": openTaskDetails(button.dataset.recordId); break;
       case "close-task-detail": closeTaskDetails(); break;
-      case "clear-records": state.records = []; state.recordFilters = { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER }; state.taskDetailRecordId = ""; saveState(state); render(); break;
+      case "clear-records": state.records = []; state.recordFilters = { profile: ALL_RECORD_FILTER, status: ALL_RECORD_FILTER, executionType: ALL_RECORD_FILTER }; state.taskDetailRecordId = ""; saveState(state); render(); break;
       case "clear-data": state.dataRows = []; state.dataFilters = createDataFilterValues(DATA_FILTER_DEFINITIONS); saveState(state); render(); break;
       case "copy-json": {
         const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
         try {
-          openRowsJsonPreview(rows, buildXiaohongshuProfileExportRows);
+          openRowsJsonPreview(rows, (currentRows) => projectDataRowsByColumns(
+            buildXiaohongshuProfileExportRows(currentRows), DATA_COLUMNS, state.dataColumnVisibility
+          ));
         } catch (error) {
           state.notice = { tone: "error", text: `打开 JSON 数据失败：${error.message || String(error)}` };
           render();
@@ -823,7 +1011,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       }
       case "export-csv": {
         const rows = filterDataRows(state.dataRows, DATA_FILTER_DEFINITIONS, state.dataFilters);
-        downloadXiaohongshuProfileData(rows, "csv");
+        downloadDataRowsCsv(buildXiaohongshuProfileExportRows(rows), DATA_COLUMNS, state.dataColumnVisibility, "xiaohongshu-profile-notes-data");
         state.notice = { tone: "success", text: `已导出 ${rows.length} 条筛选后的表格数据（CSV）。` };
         render();
         break;
@@ -835,10 +1023,13 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
         state.concurrency = DEFAULT_OPTIONS.concurrency;
         state.intervalMinMs = DEFAULT_OPTIONS.intervalMinMs;
         state.intervalMaxMs = DEFAULT_OPTIONS.intervalMaxMs;
+        state.forceUpdateData = DEFAULT_OPTIONS.forceUpdateData;
         state.polling = DEFAULT_OPTIONS.polling;
         state.pollingMinutes = DEFAULT_OPTIONS.pollingMinutes;
         state.optionsOpen = false;
+        state.pageParametersOpen = false;
         state.notice = { tone: "success", text: "已还原主页输入与基础运行选项。" };
+        syncJsonDraft();
         saveState(state);
         render();
         break;
@@ -847,6 +1038,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
   };
 
   const handleInput = (event) => {
+    if (event.target.matches("[data-runner-json-input]")) { updateFeatureRunnerDraft(state.runnerPanel, event.target.value); return; }
     const dataFilter = event.target.dataset.dataFilter;
     if (dataFilter && event.target.tagName === "INPUT") {
       const selectionStart = event.target.selectionStart;
@@ -859,6 +1051,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
       });
       return;
     }
+    if (event.target.matches("[data-json-input]")) { state.jsonDraft = event.target.value; return; }
     if (event.target.dataset.profileIndex !== undefined) state.profileUrls[Number(event.target.dataset.profileIndex)] = event.target.value;
     if (event.target.matches("[data-batch-input]")) state.batchDraft = event.target.value;
     const field = event.target.dataset.field;
@@ -869,14 +1062,23 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     if (field === "pollingMinutes") state.pollingMinutes = asInteger(event.target.value, state.pollingMinutes, 1, 1440);
   };
   const handleChange = (event) => {
+    const dataColumn = event.target.dataset.dataColumn;
+    if (dataColumn) {
+      state.dataColumnVisibility[dataColumn] = event.target.checked;
+      state.dataColumnVisibility = createDataColumnVisibility(DATA_COLUMNS, state.dataColumnVisibility);
+      saveState(state);
+      scheduleDataColumnRender(render);
+      return;
+    }
     const dataFilter = event.target.dataset.dataFilter;
     if (dataFilter) { state.dataFilters[dataFilter] = event.target.value; render(); return; }
     const recordFilter = event.target.dataset.recordFilter;
     if (recordFilter) { state.recordFilters[recordFilter] = event.target.value; render(); return; }
     const field = event.target.dataset.field;
     if (field === "intervalMinMs" || field === "intervalMaxMs") Object.assign(state, normalizeProfileIntervalRange(state));
+    if (field === "forceUpdateData") state.forceUpdateData = event.target.checked;
     if (field === "polling") state.polling = event.target.checked;
-    if (["limit", "concurrency", "intervalMinMs", "intervalMaxMs", "polling", "pollingMinutes"].includes(field)) { saveState(state); render(); }
+    if (["limit", "concurrency", "intervalMinMs", "intervalMaxMs", "forceUpdateData", "polling", "pollingMinutes"].includes(field)) { saveState(state); render(); }
   };
   const handleKeydown = (event) => {
     if (event.key !== "Escape") return;
@@ -885,6 +1087,19 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     else if (state.batchOpen) { state.batchOpen = false; render(); }
   };
 
+  syncFeatureRunnerDraft(state.runnerPanel, buildProfileJsonParameters(state));
+  const unsubscribeRunner = subscribeFeatureRunnerPanel(state.runnerPanel, render, async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+    state.dataRows = Array.isArray(latest?.dataRows)
+      ? applyItemLimit(latest.dataRows, state.dataStorageLimit)
+        .map((row) => ({ ...row, noteLikes: normalizeXiaohongshuLikes(row?.noteLikes ?? row?.likes) }))
+      : state.dataRows;
+    state.notice = latest?.notice || state.notice;
+  }, async () => {
+    const latest = await loadSavedState().catch(() => null);
+    state.records = limitProfileRecordsPerStatus(latest?.records || state.records, state.taskRecordsPerStatusLimit);
+  });
   container.addEventListener("click", handleClick);
   container.addEventListener("input", handleInput);
   container.addEventListener("change", handleChange);
@@ -900,6 +1115,7 @@ export async function mountXiaohongshuProfileNotesMonitor(container, context) {
     container.removeEventListener("change", handleChange);
     document.removeEventListener("keydown", handleKeydown);
     globalThis.removeEventListener?.(PROFILE_RUN_EVENT, handleLiveRunFinished);
+    unsubscribeRunner();
     container.replaceChildren();
   };
 }

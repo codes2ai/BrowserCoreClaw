@@ -1,3 +1,5 @@
+import { normalizeWeiboPublishedAt } from "../date-normalizer.js";
+
 export function buildWeiboPostDetailExportRows(dataRows) {
   return (Array.isArray(dataRows) ? dataRows : []).map((row) => ({
     postUrl: row.postUrl || "",
@@ -7,7 +9,7 @@ export function buildWeiboPostDetailExportRows(dataRows) {
     authorUrl: row.authorUrl || "",
     authorAvatar: row.authorAvatar || "",
     text: row.text || "",
-    publishedAt: row.publishedAt || "",
+    publishedAt: normalizeWeiboPublishedAt(row.publishedAt, { referenceDate: row.capturedAt }),
     source: row.source || "",
     reposts: row.reposts || "",
     comments: row.comments || "",

@@ -1,3 +1,5 @@
+import { normalizeXiaohongshuLikes } from "../likes-normalizer.js";
+
 export function buildXiaohongshuKeywordExportRows(dataRows) {
   return dataRows.map((row) => ({
     pageOrder: row.pageOrder || "",
@@ -6,7 +8,7 @@ export function buildXiaohongshuKeywordExportRows(dataRows) {
     noteTitle: row.title || row.noteTitle || "",
     noteContent: row.description || row.noteContent || row.desc || "",
     author: row.author || row.source || "",
-    likes: row.likes || "",
+    likes: normalizeXiaohongshuLikes(row.likes),
     publishedAt: row.publishedAt || row.time || "",
     url: row.url || "",
     collectedAt: row.capturedAt || ""

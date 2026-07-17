@@ -1,3 +1,8 @@
+import {
+  getTaskExecutionTypeLabel,
+  normalizeTaskExecutionType
+} from "./task-record-type.js";
+
 function asUniqueStrings(values) {
   return Array.from(new Set(
     (Array.isArray(values) ? values : [values])
@@ -60,10 +65,13 @@ export function renderTaskDetailModal({
         <div class="${prefix}-task-detail-body">
           <dl class="${prefix}-task-summary">
             <div><dt>${escapeHtml(subjectLabel)}</dt><dd>${escapeHtml(record.keyword || "-")}</dd></div>
+            <div><dt>运行类型</dt><dd><span class="task-execution-type ${escapeHtml(normalizeTaskExecutionType(record))}">${escapeHtml(getTaskExecutionTypeLabel(record))}</span></dd></div>
+            ${record.runnerTaskId ? `<div><dt>父 Runner 任务</dt><dd><code>${escapeHtml(record.runnerTaskId)}</code></dd></div>` : ""}
             <div><dt>执行轮次</dt><dd>第 ${escapeHtml(record.round || "-")} 轮</dd></div>
             <div><dt>开始时间</dt><dd>${escapeHtml(record.startedAt || "-")}</dd></div>
             <div><dt>任务状态</dt><dd>${renderStatus(record)}</dd></div>
             <div><dt>结果数量</dt><dd>${Number(record.resultCount) || 0} 条</dd></div>
+            <div><dt>新增数量</dt><dd>${Number(record.addedCount) || 0} 条</dd></div>
             <div><dt>耗时</dt><dd>${escapeHtml(record.duration || "-")}</dd></div>
           </dl>
 

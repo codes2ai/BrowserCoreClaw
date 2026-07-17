@@ -1,5 +1,10 @@
 export async function runXiaohongshuSearchPageCommand(command, options = {}) {
   const normalText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizeLikes = (value) => {
+    const text = normalText(value);
+    if (!text || /^(?:赞|点赞|喜欢|likes?)$/i.test(text)) return "0";
+    return text.replace(/^(?:点赞|喜欢)\s*/i, "").trim() || "0";
+  };
   const isVisible = (element) => {
     const style = getComputedStyle(element);
     const rect = element.getBoundingClientRect();
@@ -74,7 +79,7 @@ export async function runXiaohongshuSearchPageCommand(command, options = {}) {
       const timePattern = /(刚刚|\d+\s*分钟前|\d+\s*小时前|\d+\s*天前|昨天|前天|\d{1,2}[-\/.]\d{1,2}|\d{4}[-\/.]\d{1,2}[-\/.]\d{1,2})/;
       const textFrom = (selector) => normalText(root.querySelector(selector)?.innerText);
       const time = textFrom(".time") || firstMatchingLine(lines, timePattern);
-      const likes = textFrom(".count") || firstMatchingLine(lines, /^(点赞\s*)?\d+(?:\.\d+)?(?:万|w|W)?$/);
+      const likes = normalizeLikes(textFrom(".count") || firstMatchingLine(lines, /^(点赞\s*)?\d+(?:\.\d+)?(?:万|w|W)?$/));
       const author = textFrom(".name") || (time && lines.indexOf(time) > 0 ? lines[lines.indexOf(time) - 1] : "");
       const title = textFrom(".title");
       const description = textFrom(".desc, .description, [class*='note-content']");

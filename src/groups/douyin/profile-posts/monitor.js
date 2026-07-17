@@ -37,6 +37,16 @@ export const mountDouyinProfilePostsMonitor = createWeiboProfileMonitor({
     { key: "url", label: "作品链接" },
     { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
   ],
+  dataColumns: [
+    { key: "profileUrl", label: "博主主页", type: "link" },
+    { key: "order", label: "顺序" },
+    { key: "videoId", label: "作品 ID" },
+    { key: "text", label: "作品描述", type: "long" },
+    { key: "likes", label: "点赞" },
+    { key: "cover", label: "封面", type: "image" },
+    { key: "postUrl", label: "作品链接", type: "link" },
+    { key: "collectedAt", label: "采集时间" }
+  ],
   toRows(data, profileUrl) {
     return (data?.posts || []).map((post) => ({ id: `${profileUrl}|${post.videoId || post.url}`, profileUrl, pageOrder: post.order, ...post, capturedAt: data?.capturedAt || new Date().toISOString() }));
   },

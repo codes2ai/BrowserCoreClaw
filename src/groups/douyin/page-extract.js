@@ -135,11 +135,20 @@ export async function runDouyinPageCommand(command, options = {}) {
   const inspectDetail = () => {
     const detail = getDetail();
     const pageText = text(document.body?.innerText);
+    const expectedVideoId = text(options.expectedVideoId);
+    const actualVideoId = text(detail.videoId);
+    const redirectedFromMissingVideo = /web_video_404_link/i.test(document.title)
+      || /web_video_404_link/i.test(location.href);
+    const videoIdMismatch = Boolean(expectedVideoId && actualVideoId && expectedVideoId !== actualVideoId);
     return {
       href: location.href,
       readyState: document.readyState,
       hasDetail: Boolean(detail.videoId && detail.text),
       detailSignature: [detail.videoId, detail.author, detail.text, detail.likes, detail.comments, detail.favorites, detail.shares].join("|"),
+      actualVideoId,
+      expectedVideoId,
+      unavailable: redirectedFromMissingVideo || videoIdMismatch,
+      unavailableReason: redirectedFromMissingVideo ? "web_video_404_link" : videoIdMismatch ? "video_id_mismatch" : "",
       captcha: /安全验证|验证码|访问频繁|请完成验证|网络环境异常/.test(pageText)
     };
   };

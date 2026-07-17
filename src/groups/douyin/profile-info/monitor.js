@@ -43,6 +43,23 @@ export const mountDouyinProfileInfoMonitor = createWeiboProfileMonitor({
     { key: "profileUrl", label: "主页链接" },
     { key: "capturedAt", label: "采集时间", placeholder: "例如 2026-07-16" }
   ],
+  dataColumns: [
+    { key: "avatar", label: "头像", type: "image" },
+    { key: "nickname", label: "昵称" },
+    { key: "profileId", label: "主页 ID" },
+    { key: "douyinId", label: "抖音号" },
+    { key: "following", label: "关注" },
+    { key: "followers", label: "粉丝" },
+    { key: "likes", label: "获赞" },
+    { key: "ipLocation", label: "IP 属地" },
+    { key: "age", label: "年龄" },
+    { key: "location", label: "地区" },
+    { key: "bio", label: "简介", type: "long" },
+    { key: "profileTags", label: "标签", type: "long" },
+    { key: "profileRawText", label: "公开资料原文", type: "long" },
+    { key: "profileUrl", label: "主页链接", type: "link" },
+    { key: "collectedAt", label: "采集时间" }
+  ],
   toRows(data, profileUrl) {
     const profile = data?.profile || {};
     const id = String(profile.profileId || profileUrl || "").trim();
